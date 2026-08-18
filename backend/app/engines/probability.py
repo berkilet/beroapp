@@ -384,26 +384,162 @@ class BaselineProbabilityModel:
         return ResolutionRisk.LOW
 
 
+def combine_estimates(
+    *,
+    market_probability: float,
+    baseline_probability: float,
+    baseline_uncertainty: float,
+    category_probability: float,
+    category_uncertainty: float,
+) -> tuple[float, dict]:
+    """Blend the market-anchored baseline with an independent category estimate.
+
+    Inverse-variance weighting in log-odds. Log-odds because it composes
+    additively and cannot leave [0,1]; inverse-variance because it is the
+    standard way to merge two estimates of the same quantity when you know how
+    much you trust each, and it degrades correctly — a category model that
+    declares high uncertainty barely moves the result.
+
+    The independent estimate is additionally capped in how far it may drag the
+    output from the market. A model claiming a 40-point edge is far more likely
+    to have a parsing bug than a genuine insight, and this platform's stance is
+    that an implausible edge is a defect until proven otherwise.
+    """
+    MAX_DEPARTURE_LOGIT = 1.2  # ~ 25 points at even money
+
+    baseline_variance = max(1e-6, baseline_uncertainty ** 2)
+    category_variance = max(1e-6, category_uncertainty ** 2)
+
+    baseline_weight = 1.0 / baseline_variance
+    category_weight = 1.0 / category_variance
+    total_weight = baseline_weight + category_weight
+
+    blended_logit = (
+        _logit(baseline_probability) * baseline_weight
+        + _logit(category_probability) * category_weight
+    ) / total_weight
+
+    market_logit = _logit(market_probability)
+    departure = blended_logit - market_logit
+    capped = max(-MAX_DEPARTURE_LOGIT, min(MAX_DEPARTURE_LOGIT, departure))
+    was_capped = abs(departure) > MAX_DEPARTURE_LOGIT
+
+    final = _sigmoid(market_logit + capped)
+
+    return final, {
+        "baseline_weight": round(baseline_weight / total_weight, 4),
+        "category_weight": round(category_weight / total_weight, 4),
+        "departure_logit": round(departure, 4),
+        "departure_capped": was_capped,
+        "cap": MAX_DEPARTURE_LOGIT,
+    }
+
+
 class ProbabilityEngine:
     """Front door for probability estimation.
 
-    Today it delegates to the baseline. When enough resolved markets exist, the
-    trained ensemble registers here alongside it and the engine combines them —
-    but only if walk-forward validation shows the combination actually improves
-    Brier score, which is checked in `engines/training.py`, not assumed.
+    Combines the market-anchored baseline with a category-specific independent
+    estimate where one is available. When no category model applies — which is
+    most markets — the baseline stands alone and the result says so, rather than
+    implying an independence it does not have.
     """
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self.baseline = BaselineProbabilityModel(self.settings)
 
-    def predict(self, inputs: ProbabilityInputs) -> ProbabilityResult:
+    def predict(
+        self,
+        inputs: ProbabilityInputs,
+        *,
+        category_estimate: object | None = None,
+    ) -> ProbabilityResult:
         started = datetime.now(UTC)
         result = self.baseline.predict(inputs)
+
+        usable = bool(category_estimate is not None and getattr(category_estimate, "is_usable", False))
+        if usable:
+            result = self._apply_category_estimate(result, inputs, category_estimate)
+        else:
+            result.rationale["independent_estimate"] = {
+                "available": False,
+                "reason": (
+                    getattr(category_estimate, "reason", "no category model applies")
+                    if category_estimate is not None
+                    else "no category model applies"
+                ),
+                "note": (
+                    "the estimate is anchored to the market price and is not an "
+                    "independent forecast"
+                ),
+            }
+
         result.rationale["model_latency_ms"] = int(
             (datetime.now(UTC) - started).total_seconds() * 1000
         )
         return result
+
+    def _apply_category_estimate(
+        self, result: ProbabilityResult, inputs: ProbabilityInputs, estimate: object
+    ) -> ProbabilityResult:
+        combined, weights = combine_estimates(
+            market_probability=inputs.midpoint,
+            baseline_probability=result.model_probability,
+            baseline_uncertainty=result.model_uncertainty,
+            category_probability=estimate.probability,
+            category_uncertainty=estimate.uncertainty,
+        )
+
+        combined = validate_probability(
+            combined,
+            model_version=estimate.model_version,
+            field_name="combined probability",
+        )
+
+        # Combined uncertainty is bounded by the more confident input: adding a
+        # second opinion should never make us less sure than we already were.
+        combined_uncertainty = min(
+            result.model_uncertainty,
+            (result.model_uncertainty * estimate.uncertainty)
+            / max(1e-6, result.model_uncertainty + estimate.uncertainty)
+            + 0.5 * min(result.model_uncertainty, estimate.uncertainty),
+        )
+
+        result.model_probability = combined
+        result.model_uncertainty = max(0.05, min(1.0, combined_uncertainty))
+        result.model_version = f"{self.baseline.version}+{estimate.model_version}"
+        result.confidence = self._combined_confidence(result, estimate)
+
+        result.rationale["independent_estimate"] = {
+            "available": True,
+            "model_id": estimate.model_id,
+            "model_version": estimate.model_version,
+            "probability": round(estimate.probability, 6),
+            "uncertainty": round(estimate.uncertainty, 4),
+            "reason": estimate.reason,
+            "assumptions": estimate.assumptions,
+            "features_used": {
+                k: round(v, 6) if isinstance(v, float) else v
+                for k, v in estimate.features_used.items()
+            },
+            "combination": weights,
+        }
+        result.rationale["approach"] = (
+            "market-anchored baseline blended with an independent category estimate "
+            "by inverse-variance weighting in log-odds"
+        )
+        return result
+
+    def _combined_confidence(self, result: ProbabilityResult, estimate: object) -> float:
+        """Confidence rises when an independent estimate exists, but only so far.
+
+        A category model contributing genuine outside information is worth more
+        confidence than microstructure alone; it is not worth certainty.
+        """
+        base = 1.0 - result.model_uncertainty
+        if estimate.uncertainty < 0.5:
+            base += 0.10
+        return max(0.0, min(0.95, base))
 
     @property
     def active_versions(self) -> list[str]:

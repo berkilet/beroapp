@@ -132,21 +132,31 @@ class CoinbaseExchangeProvider(EvidenceProvider):
             headers=self._headers(),
         )
         closes = _extract_closes(candles)
-        if len(closes) >= 30:
-            volatility = _annualised_volatility(closes[:90])
-            if volatility is not None:
-                items.append(
-                    self._item(
-                        series_key=f"CRYPTO_VOL_{asset}_USD",
-                        title=f"{asset}/USD realised volatility (annualised)",
-                        value=volatility,
-                        unit="fraction",
-                        observation_date=now,
-                        now=now,
-                        tags=tags,
-                        payload={"window_days": min(90, len(closes)), "source": "daily closes"},
-                    )
+        # Two windows. A 90-day estimate is stable but wrong for a five-day
+        # question — volatility clusters, and the recent regime matters far more
+        # over a short horizon. The model picks the window that matches its
+        # horizon rather than using one number for everything.
+        for series_suffix, window, label in (
+            ("VOL", 90, "90-day"),
+            ("VOL30", 30, "30-day"),
+        ):
+            if len(closes) < window:
+                continue
+            volatility = _annualised_volatility(closes[:window])
+            if volatility is None:
+                continue
+            items.append(
+                self._item(
+                    series_key=f"CRYPTO_{series_suffix}_{asset}_USD",
+                    title=f"{asset}/USD realised volatility, {label} (annualised)",
+                    value=volatility,
+                    unit="fraction",
+                    observation_date=now,
+                    now=now,
+                    tags=tags,
+                    payload={"window_days": window, "source": "daily closes"},
                 )
+            )
 
         return items
 
