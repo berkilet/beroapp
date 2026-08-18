@@ -27,24 +27,75 @@ from app.db.session import session_scope
 from app.ingest.http import FetchError
 from app.ingest.polymarket import PolymarketClient
 from app.ingest.repository import record_book, record_system_event
-from app.workers.discovery import active_token_ids
+from app.workers.discovery import active_token_ids, count_active_tokens
 
 log = get_logger("workers.snapshot")
 
 
 class SnapshotWorker:
+    """Polls order books for the most liquid slice of the universe that fits
+    inside one interval.
+
+    The budget is **measured, not assumed**. A first attempt sized it from the
+    configured rate limit (5 req/s x 50 tokens x 60 s x safety factor = 9,000
+    tokens, nominally 36 s) and the real cycle took 80 s: the limiter permits 5
+    req/s, but round-trip latency and database writes mean observed throughput
+    is closer to 2.2 batches/s. Rather than hand-tune a constant that will be
+    wrong on a different machine or a slower day, the worker measures its own
+    throughput and sizes the next cycle from it.
+    """
+
     def __init__(self, client: PolymarketClient, settings: Settings | None = None) -> None:
         self.client = client
         self.settings = settings or get_settings()
         self.consecutive_batch_failures = 0
         self.last_clock_skew_s: float | None = None
+        self.observed_tokens_per_second: float | None = None
+        """Exponentially smoothed measurement of real throughput."""
+
+    def _budget(self) -> int:
+        """Tokens to poll this cycle.
+
+        Before any measurement exists, fall back to the configured estimate.
+        Afterwards, size from what this deployment actually achieves.
+        """
+        configured = self.settings.snapshot_token_budget
+        if self.settings.snapshot_max_tokens > 0 or self.observed_tokens_per_second is None:
+            return configured
+
+        target_seconds = self.settings.snapshot_interval_s * self.settings.snapshot_budget_safety_factor
+        measured = int(self.observed_tokens_per_second * target_seconds)
+        # Never collapse to nothing on one slow cycle, and never exceed the
+        # configured ceiling — the rate limit is still the hard constraint.
+        return max(self.settings.book_batch_size, min(configured, measured))
+
+    def _record_throughput(self, tokens: int, elapsed_s: float) -> None:
+        if elapsed_s <= 0 or tokens <= 0:
+            return
+        rate = tokens / elapsed_s
+        if self.observed_tokens_per_second is None:
+            self.observed_tokens_per_second = rate
+        else:
+            # Smoothed so one slow cycle does not halve the universe coverage.
+            self.observed_tokens_per_second = 0.7 * self.observed_tokens_per_second + 0.3 * rate
 
     async def run_once(self, *, token_limit: int | None = None) -> dict:
         started = datetime.now(UTC)
-        tokens = active_token_ids(limit=token_limit)
+
+        # The universe is larger than the cadence: ~39,000 tokens cannot be
+        # polled inside 60 s. Poll the most liquid slice that fits rather than
+        # the whole universe slowly — a stale price on a liquid market is
+        # misleading, while an illiquid market sampled less often is not
+        # tradeable regardless. Nothing is dropped from the database; it is
+        # sampled at a lower frequency.
+        budget = token_limit or self._budget()
+        universe_size = count_active_tokens()
+        tokens = active_token_ids(limit=budget)
 
         stats = {
             "tokens_requested": len(tokens),
+            "universe_size": universe_size,
+            "universe_coverage": round(len(tokens) / universe_size, 4) if universe_size else 0.0,
             "books_received": 0,
             "books_rejected": 0,
             "snapshots_written": 0,
@@ -121,8 +172,16 @@ class SnapshotWorker:
                         ):
                             stats["stale_books"] += 1
 
+        elapsed_s = (datetime.now(UTC) - started).total_seconds()
+        self._record_throughput(len(tokens), elapsed_s)
+
         health = self._health(stats)
         stats["clock_skew_s"] = self.last_clock_skew_s
+        stats["elapsed_s"] = round(elapsed_s, 1)
+        stats["observed_tokens_per_second"] = (
+            round(self.observed_tokens_per_second, 1) if self.observed_tokens_per_second else None
+        )
+        stats["next_cycle_budget"] = self._budget()
 
         with session_scope() as session:
             record_system_event(

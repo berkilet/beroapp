@@ -123,25 +123,40 @@ class DiscoveryWorker:
         return stats
 
 
-def active_token_ids(limit: int | None = None) -> list[str]:
-    """Tokens worth polling this cycle.
+def _active_token_query():
+    """Tokens worth polling. Excludes closed, archived and book-less markets."""
+    return (
+        select(MarketToken.token_id)
+        .join(Market, Market.id == MarketToken.market_id)
+        .where(
+            Market.closed.is_(False),
+            Market.archived.is_(False),
+            Market.enable_order_book.is_(True),
+            Market.accepting_orders.is_(True),
+        )
+    )
 
-    Ordered by liquidity so that if the budget is capped we spend it on markets
-    where an executable edge could plausibly exist. Excludes closed and archived
-    markets, and markets with no CLOB book.
+
+def active_token_ids(limit: int | None = None) -> list[str]:
+    """Tokens to poll this cycle, most liquid first.
+
+    The ordering is what makes a capped budget defensible: when we cannot poll
+    everything within the cadence, we spend the budget where an executable edge
+    could plausibly exist. Markets below the cut are still discovered, stored and
+    retained — they are sampled less often, not dropped.
     """
     with session_scope() as session:
-        stmt = (
-            select(MarketToken.token_id)
-            .join(Market, Market.id == MarketToken.market_id)
-            .where(
-                Market.closed.is_(False),
-                Market.archived.is_(False),
-                Market.enable_order_book.is_(True),
-                Market.accepting_orders.is_(True),
-            )
-            .order_by(func.coalesce(Market.liquidity_num, 0).desc())
-        )
+        stmt = _active_token_query().order_by(func.coalesce(Market.liquidity_num, 0).desc())
         if limit:
             stmt = stmt.limit(limit)
         return list(session.execute(stmt).scalars())
+
+
+def count_active_tokens() -> int:
+    """Size of the pollable universe, for coverage reporting."""
+    with session_scope() as session:
+        return int(
+            session.execute(
+                select(func.count()).select_from(_active_token_query().subquery())
+            ).scalar_one()
+        )

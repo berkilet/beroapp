@@ -107,6 +107,23 @@ class Settings(BaseSettings):
     discovery_page_size: int = 100
     discovery_max_pages: int = 60
 
+    snapshot_max_tokens: int = 0
+    """Cap on tokens polled per snapshot cycle. 0 means derive it from the
+    request budget (see ``snapshot_token_budget``).
+
+    This exists because the universe is larger than the cadence. Polling ~39,000
+    tokens at 5 req/s in batches of 50 takes about 156 s, which overruns a 60 s
+    interval by 2.6x and pushes data age toward the staleness limit. Sampling
+    the most liquid slice at the intended cadence is strictly better than
+    sampling everything at an unintended one: an illiquid market we poll every
+    three minutes is not tradeable anyway, while a stale price on a liquid one
+    is actively misleading.
+    """
+
+    snapshot_budget_safety_factor: float = 0.6
+    """Fraction of the interval a snapshot cycle may consume, leaving headroom
+    for retries, database writes, and a slow upstream."""
+
     # ------------------------------------------------------------------
     # Worker cadence
     # ------------------------------------------------------------------
@@ -259,6 +276,18 @@ class Settings(BaseSettings):
             for u in (self.gamma_base_url, self.clob_base_url, self.data_base_url)
         }
         return frozenset(h for h in hosts if h)
+
+    @property
+    def snapshot_token_budget(self) -> int:
+        """How many tokens one snapshot cycle can poll within its interval.
+
+        requests_available = interval * rps * safety_factor
+        tokens             = requests_available * batch_size
+        """
+        if self.snapshot_max_tokens > 0:
+            return self.snapshot_max_tokens
+        requests = self.snapshot_interval_s * self.clob_rps * self.snapshot_budget_safety_factor
+        return max(self.book_batch_size, int(requests) * self.book_batch_size)
 
     @property
     def paper_trading_active(self) -> bool:

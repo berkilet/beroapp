@@ -645,3 +645,112 @@ def test_classification_records_its_evidence() -> None:
     result = classify(question="q", tag_slugs=["crypto", "bitcoin"])
     assert result.matched_on == "tags"
     assert any("crypto" in e or "bitcoin" in e for e in result.evidence)
+
+
+# ---------------------------------------------------------------------------
+# Snapshot budget
+# ---------------------------------------------------------------------------
+def test_snapshot_budget_fits_inside_the_interval() -> None:
+    """The universe is larger than the cadence, so the budget must be derived
+    from what one interval can actually poll — otherwise every cycle overruns
+    and data age drifts toward the staleness limit."""
+    from app.core.config import Settings
+
+    s = Settings(
+        allow_insecure_local=True, api_key="",
+        snapshot_interval_s=60, clob_rps=5.0, book_batch_size=50,
+        snapshot_budget_safety_factor=0.6,
+    )
+    budget = s.snapshot_token_budget
+    seconds_needed = budget / s.book_batch_size / s.clob_rps
+
+    assert seconds_needed <= s.snapshot_interval_s * s.snapshot_budget_safety_factor + 1
+    assert budget == 9_000
+
+
+def test_explicit_snapshot_cap_overrides_the_derived_budget() -> None:
+    from app.core.config import Settings
+
+    s = Settings(allow_insecure_local=True, api_key="", snapshot_max_tokens=500)
+    assert s.snapshot_token_budget == 500
+
+
+def test_budget_never_falls_below_one_batch() -> None:
+    """A pathological configuration must still poll something."""
+    from app.core.config import Settings
+
+    s = Settings(
+        allow_insecure_local=True, api_key="",
+        snapshot_interval_s=1, data_staleness_s=60, clob_rps=0.1, book_batch_size=50,
+    )
+    assert s.snapshot_token_budget >= s.book_batch_size
+
+
+def test_snapshot_budget_adapts_to_measured_throughput() -> None:
+    """The configured budget is an estimate; the measured one is the truth.
+
+    Sizing from the rate limit alone gave a 9,000-token budget that took 80s
+    against a 60s interval, because round-trip latency and database writes
+    dominate the limiter. The worker must shrink to what it actually achieves.
+    """
+    from app.core.config import Settings
+    from app.workers.snapshot import SnapshotWorker
+
+    s = Settings(
+        allow_insecure_local=True, api_key="",
+        snapshot_interval_s=60, clob_rps=5.0, book_batch_size=50,
+        snapshot_budget_safety_factor=0.6,
+    )
+    worker = SnapshotWorker.__new__(SnapshotWorker)
+    worker.settings = s
+    worker.observed_tokens_per_second = None
+
+    # No measurement yet: use the configured estimate.
+    assert worker._budget() == 9_000
+
+    # After observing the real rate (9,000 tokens in 80s = 112.5/s), the budget
+    # shrinks to what fits 36s.
+    worker._record_throughput(9_000, 80.0)
+    assert worker.observed_tokens_per_second == pytest.approx(112.5)
+    assert worker._budget() == pytest.approx(112.5 * 36, rel=0.01)
+    assert worker._budget() < 9_000
+
+
+def test_throughput_measurement_is_smoothed() -> None:
+    """One slow cycle must not halve coverage."""
+    from app.core.config import Settings
+    from app.workers.snapshot import SnapshotWorker
+
+    worker = SnapshotWorker.__new__(SnapshotWorker)
+    worker.settings = Settings(allow_insecure_local=True, api_key="")
+    worker.observed_tokens_per_second = None
+
+    worker._record_throughput(1_000, 10.0)   # 100/s
+    assert worker.observed_tokens_per_second == pytest.approx(100.0)
+
+    worker._record_throughput(1_000, 100.0)  # a 10/s outlier
+    assert worker.observed_tokens_per_second == pytest.approx(0.7 * 100 + 0.3 * 10)
+    assert worker.observed_tokens_per_second > 50
+
+
+def test_budget_never_collapses_below_one_batch() -> None:
+    from app.core.config import Settings
+    from app.workers.snapshot import SnapshotWorker
+
+    s = Settings(allow_insecure_local=True, api_key="", book_batch_size=50)
+    worker = SnapshotWorker.__new__(SnapshotWorker)
+    worker.settings = s
+    worker.observed_tokens_per_second = 0.001  # pathologically slow
+    assert worker._budget() == s.book_batch_size
+
+
+def test_explicit_cap_disables_adaptation() -> None:
+    """An operator who sets an explicit cap means it."""
+    from app.core.config import Settings
+    from app.workers.snapshot import SnapshotWorker
+
+    s = Settings(allow_insecure_local=True, api_key="", snapshot_max_tokens=500)
+    worker = SnapshotWorker.__new__(SnapshotWorker)
+    worker.settings = s
+    worker.observed_tokens_per_second = 10_000.0
+    assert worker._budget() == 500

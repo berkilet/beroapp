@@ -145,7 +145,7 @@ class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
                 if int(declared) > self.max_bytes:
                     return Response(
                         content='{"error":{"code":"payload_too_large","message":"request body too large"}}',
-                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                         media_type="application/json",
                     )
             except ValueError:
