@@ -9,6 +9,7 @@ audit trail, not things a browser session can do.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
@@ -49,6 +50,25 @@ from app.engines.killswitch import KillSwitchEvaluator, RiskState, set_global_ki
 router = APIRouter()
 Viewer = Annotated[Role, Depends(require_viewer)]
 Operator = Annotated[Role, Depends(require_operator)]
+
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _clean_search_term(raw: str) -> str:
+    """Make a user-supplied search term safe to bind into an ILIKE.
+
+    Two separate problems, both real:
+
+    * PostgreSQL text columns cannot contain NUL, so binding one raises a
+      DataError and turns a hostile query string into a 500. Control characters
+      cannot match a market question anyway, so they are stripped.
+    * ``%`` and ``_`` are ILIKE wildcards. Binding is what prevents injection,
+      but an unescaped ``%`` still lets a caller turn any search into a full
+      scan, so they are escaped.
+    """
+    stripped = _CONTROL_CHARS.sub("", raw).strip()
+    return stripped.replace("\\", r"\\").replace("%", r"\%").replace("_", r"\_")
 
 
 def get_session():
@@ -172,10 +192,9 @@ def list_markets(
     if status:
         stmt = stmt.where(Market.status == status)
     if search:
-        # Parameter-bound; ilike escapes nothing itself, so wildcards in user
-        # input are neutralised before binding.
-        cleaned = search.replace("%", r"\%").replace("_", r"\_")
-        stmt = stmt.where(Market.question.ilike(f"%{cleaned}%"))
+        cleaned = _clean_search_term(search)
+        if cleaned:
+            stmt = stmt.where(Market.question.ilike(f"%{cleaned}%"))
 
     total = session.execute(
         select(func.count()).select_from(stmt.subquery())

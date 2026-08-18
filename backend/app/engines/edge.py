@@ -76,6 +76,11 @@ class EdgeResult:
 
 
 class EdgeEngine:
+    MIN_FILL_RATIO = 0.50
+    """Fraction of the reference order size the book must be able to absorb
+    before a signal counts as executable. Below this the edge is arithmetic on
+    a position we could not actually take."""
+
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
@@ -137,6 +142,22 @@ class EdgeEngine:
                 f"raw edge {raw_edge:+.4f} collapses to executable {executable_edge:+.4f} "
                 f"at the real fill price {exec_price:.4f} (touch {estimate.reference_price:.4f}, "
                 f"slippage {estimate.slippage:.4f})"
+            )
+            return self._no_trade(
+                prediction, profile, Recommendation.NO_TRADE, reasons,
+                raw_edge=raw_edge, executable_edge=executable_edge, side=side,
+                estimate=estimate, fees=fees,
+            )
+
+        # Spec §18: an opportunity that cannot realistically be entered is not
+        # an executable opportunity. A one-level book shows zero slippage
+        # against its own touch no matter how thin it is, so fill ratio — not
+        # slippage — is what catches this case.
+        if estimate.fill_ratio < self.MIN_FILL_RATIO:
+            reasons.append(
+                f"book fills only {estimate.fill_ratio:.0%} of the ${size_usd:,.0f} reference "
+                f"size (${estimate.fillable_size_usd:,.0f} available); this is not an "
+                "executable opportunity regardless of the arithmetic edge"
             )
             return self._no_trade(
                 prediction, profile, Recommendation.NO_TRADE, reasons,

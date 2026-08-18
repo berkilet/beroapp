@@ -107,7 +107,7 @@ def calibration_bins(
         members = [
             (p, o)
             for p, o in zip(predictions, outcomes, strict=True)
-            if (lower <= p <= upper) if is_last else (lower <= p < upper)
+            if ((lower <= p <= upper) if is_last else (lower <= p < upper))
         ]
         if members:
             mean_p = sum(p for p, _ in members) / len(members)
