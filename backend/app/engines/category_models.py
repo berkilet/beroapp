@@ -29,11 +29,10 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from datetime import datetime
 
 from app.core.config import Settings, get_settings
 from app.core.enums import MarketSubcategory
-from app.engines.features import FeatureVector, required_features
+from app.engines.features import FeatureVector
 from app.engines.probability import validate_probability
 from app.evidence.question_shape import QuestionShape, ShapeResult
 

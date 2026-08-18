@@ -21,7 +21,7 @@ one named rule. The optional LLM layer may *refine* this, never replace it.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from app.core.enums import (
     EventType,

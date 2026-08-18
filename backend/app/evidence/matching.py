@@ -25,7 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from app.core.enums import MarketCategory, MarketSubcategory
+from app.core.enums import MarketSubcategory
 from app.db.models import ExternalEvent, Market, MarketEvidenceLink
 
 # Subcategory -> series that inform it. The core routing table: it is what

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import math
 import statistics
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from app.core.enums import (
     ComponentHealth,

@@ -62,7 +62,7 @@ from app.engines.probability import (
     ProbabilityInputs,
 )
 from app.engines.category_models import CategoryModelRouter
-from app.engines.features import FEATURE_SET_VERSION, FeatureBuilder
+from app.engines.features import FeatureBuilder
 from app.engines.risk import PortfolioState, RiskEngine
 from app.evidence.classify import classify_deep
 from app.evidence.question_shape import detect_shape

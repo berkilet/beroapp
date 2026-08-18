@@ -8,17 +8,16 @@ Two sources, both public domain and keyless:
   free input available for Fed-rate markets. Verified 2026-08-18.
 * **Fiscal Data** — average interest rates on public debt, REST JSON.
 
-XML is parsed with the standard library's ``ElementTree``. That is a deliberate
-choice: ``defusedxml`` would be better still, but ElementTree in CPython 3.11
-does not resolve external entities and does not expand entity references by
-default, so the classic XXE and billion-laughs vectors do not apply. The feed is
-additionally size-capped before parsing.
+XML is parsed with ``defusedxml``, which hardens the standard parser against
+XXE, billion-laughs and quadratic-blowup attacks. The Treasury feed is a trusted
+government source, but it arrives over the network and is therefore untrusted
+input like any other; the feed is additionally size-capped before parsing.
 """
 
 from __future__ import annotations
 
 import re
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 from datetime import UTC, datetime
 
 from app.core.enums import (
@@ -87,7 +86,7 @@ class TreasuryYieldCurveProvider(EvidenceProvider):
 
         try:
             root = ET.fromstring(body)
-        except ET.ParseError as exc:
+        except Exception as exc:  # defusedxml raises several parse/entity errors
             self._record_health(ComponentHealth.FAILED, f"XML parse failed: {exc}", error_code="parse_error")
             raise EvidenceError(
                 f"treasury feed is not parseable XML: {exc}",
