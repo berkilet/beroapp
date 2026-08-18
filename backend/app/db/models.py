@@ -39,7 +39,13 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import (
     ComponentHealth,
+    ConflictResolution,
+    EventType,
+    EvidenceType,
     ExecutionVenue,
+    MarketSubcategory,
+    ModelabilityTier,
+    ResolutionMechanism,
     MarketCategory,
     MarketStatus,
     ModelabilityStatus,
@@ -144,6 +150,14 @@ class Market(Base):
     end_date: Mapped[datetime | None] = ts_column(index=True)
     source_created_at: Mapped[datetime | None] = ts_column()
     source_updated_at: Mapped[datetime | None] = ts_column()
+
+    # -- deeper classification (Phase 1.5) --------------------------------
+    subcategory: Mapped[str | None] = _enum_col(MarketSubcategory, index=True)
+    event_type: Mapped[str | None] = _enum_col(EventType)
+    resolution_mechanism: Mapped[str | None] = _enum_col(ResolutionMechanism)
+    classification_detail: Mapped[dict | None] = mapped_column(JSONB)
+    modelability_tier: Mapped[str | None] = _enum_col(ModelabilityTier, index=True)
+    evidence_available: Mapped[bool | None] = mapped_column(Boolean)
 
     modelability_status: Mapped[str] = _enum_col(
         ModelabilityStatus, default=ModelabilityStatus.INSUFFICIENT_DATA.value, nullable=False, index=True
@@ -285,6 +299,21 @@ class ExternalSource(Base):
     requires_api_key: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     usage_notes: Mapped[str | None] = mapped_column(Text)
 
+    # -- registry fields (Phase 1.5) --------------------------------------
+    source_key: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    """Stable slug used in code and config. ``name`` is for humans and may change."""
+    categories: Mapped[list | None] = mapped_column(JSONB)
+    """Market categories/subcategories this source can serve. Drives matching."""
+    access_method: Mapped[str | None] = mapped_column(String(32))
+    update_frequency_s: Mapped[int | None] = mapped_column(Integer)
+    daily_request_budget: Mapped[int | None] = mapped_column(Integer)
+    """Hard daily cap where the provider documents one (BLS keyless is 25/day)."""
+    requests_today: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    budget_reset_at: Mapped[datetime | None] = ts_column()
+    parser_name: Mapped[str | None] = mapped_column(String(64))
+    parser_version: Mapped[str | None] = mapped_column(String(32))
+    terms_url: Mapped[str | None] = mapped_column(String(512))
+
     health: Mapped[str] = _enum_col(ComponentHealth, default=ComponentHealth.UNKNOWN.value, nullable=False)
     last_success_at: Mapped[datetime | None] = ts_column()
     last_error_at: Mapped[datetime | None] = ts_column()
@@ -311,6 +340,22 @@ class ExternalEvent(Base):
     title: Mapped[str | None] = mapped_column(Text)
     payload: Mapped[dict | None] = mapped_column(JSONB)
 
+    # -- structured observation fields (Phase 1.5) ------------------------
+    evidence_type: Mapped[str | None] = _enum_col(EvidenceType, index=True)
+    series_key: Mapped[str | None] = mapped_column(String(96), index=True)
+    """Stable identifier for a repeated measurement, e.g. "CPI_URBAN_ALL" or
+    "UST_YIELD_10Y". Two rows sharing a series_key and observation_date are
+    competing measurements of the same fact and are candidates for conflict."""
+    numeric_value: Mapped[float | None] = mapped_column(Float)
+    unit: Mapped[str | None] = mapped_column(String(32))
+    observation_date: Mapped[datetime | None] = ts_column(index=True)
+    """The date the measurement REFERS to (July CPI), which is not the date it
+    was published (mid-August) nor the date we learned it (known_at). All three
+    are distinct and conflating any two of them creates look-ahead bias."""
+    superseded_by_id: Mapped[int | None] = mapped_column(BigInteger)
+    """Set when a later revision replaces this observation. The original row is
+    never mutated — a correction is a new row plus this pointer."""
+
     published_at: Mapped[datetime | None] = ts_column()
     ingested_at: Mapped[datetime] = ts_column(default=utcnow, nullable=False)
     known_at: Mapped[datetime] = ts_column(nullable=False, index=True)
@@ -325,6 +370,8 @@ class ExternalEvent(Base):
     __table_args__ = (
         UniqueConstraint("source_id", "content_hash", name="source_content"),
         Index("ix_external_events_market_known", "market_id", "known_at"),
+        Index("ix_external_events_series_known", "series_key", "known_at"),
+        Index("ix_external_events_series_observation", "series_key", "observation_date"),
     )
 
 
@@ -690,3 +737,116 @@ class SystemConfig(Base):
     value: Mapped[dict] = mapped_column(JSONB, nullable=False)
     updated_at: Mapped[datetime] = ts_column(default=utcnow, nullable=False)
     updated_by: Mapped[str] = mapped_column(String(64), nullable=False, default="system")
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.5: evidence linkage, conflicts, materialised features
+# ---------------------------------------------------------------------------
+
+
+class MarketEvidenceLink(Base):
+    """Which evidence is relevant to which market, and why.
+
+    A separate table rather than ``external_events.market_id`` because the
+    relationship is genuinely many-to-many: one CPI release is relevant to every
+    inflation market simultaneously. Duplicating the observation per market
+    would both waste space and, worse, make it possible for two copies of the
+    same fact to drift apart.
+    """
+
+    __tablename__ = "market_evidence_links"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), nullable=False, index=True)
+    evidence_id: Mapped[int] = mapped_column(ForeignKey("external_events.id"), nullable=False, index=True)
+
+    relevance: Mapped[float] = mapped_column(Float, nullable=False)
+    """In [0,1]. How much this evidence bears on this market."""
+    match_reason: Mapped[str] = mapped_column(String(128), nullable=False)
+    """Named rule that produced the link, so a match can be explained."""
+    match_detail: Mapped[dict | None] = mapped_column(JSONB)
+
+    known_at: Mapped[datetime] = ts_column(nullable=False, index=True)
+    """When the link became usable — max(evidence.known_at, link creation).
+    The feature layer filters on this, not on the evidence's own known_at."""
+    created_at: Mapped[datetime] = ts_column(default=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("market_id", "evidence_id", name="market_evidence"),
+        Index("ix_market_evidence_links_market_known", "market_id", "known_at"),
+        CheckConstraint("relevance >= 0 AND relevance <= 1", name="relevance_unit"),
+    )
+
+
+class EvidenceConflict(Base):
+    """A recorded disagreement between sources about the same fact.
+
+    Conflicts are stored rather than silently averaged. Averaging an official
+    statistic with a news report about that statistic is not a better estimate;
+    it is a worse one, and it hides that the disagreement existed.
+    """
+
+    __tablename__ = "evidence_conflicts"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    series_key: Mapped[str] = mapped_column(String(96), nullable=False, index=True)
+    observation_date: Mapped[datetime | None] = ts_column()
+    market_id: Mapped[int | None] = mapped_column(ForeignKey("markets.id"), index=True)
+
+    winning_evidence_id: Mapped[int | None] = mapped_column(ForeignKey("external_events.id"))
+    resolution: Mapped[str] = _enum_col(ConflictResolution, nullable=False)
+    resolution_detail: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    candidates: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    """Every competing value, with its source, tier and timestamp."""
+
+    spread: Mapped[float | None] = mapped_column(Float)
+    """Numeric disagreement between the extreme candidates, where comparable."""
+
+    detected_at: Mapped[datetime] = ts_column(default=utcnow, nullable=False, index=True)
+    known_at: Mapped[datetime] = ts_column(nullable=False)
+
+    __table_args__ = (
+        Index("ix_evidence_conflicts_series_observation", "series_key", "observation_date"),
+    )
+
+
+class MarketFeatures(Base):
+    """Materialised feature vector for one market at one point in time.
+
+    Stored rather than always recomputed for two reasons: training needs a
+    stable matrix, and a backtest that recomputes features from scratch is a
+    backtest that can quietly diverge from what production actually used.
+
+    ``known_at`` is the timestamp the whole vector is valid at. Every individual
+    feature additionally carries its own source timestamp inside
+    ``feature_timestamps``, so a stale input is visible rather than assumed
+    fresh.
+    """
+
+    __tablename__ = "market_features"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    market_id: Mapped[int] = mapped_column(ForeignKey("markets.id"), nullable=False, index=True)
+    token_id: Mapped[str] = mapped_column(String(96), nullable=False)
+
+    category: Mapped[str] = _enum_col(MarketCategory, nullable=False, index=True)
+    subcategory: Mapped[str | None] = _enum_col(MarketSubcategory)
+    feature_set_version: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+
+    known_at: Mapped[datetime] = ts_column(nullable=False, index=True)
+    features: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    feature_timestamps: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    """Per-feature known_at. The oldest of these is the vector's real age."""
+    evidence_ids: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    """Exact evidence rows that produced this vector — the provenance chain."""
+
+    missing_features: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    """Named features that could not be computed. A model that requires one of
+    these must be marked degraded rather than run on a substituted value."""
+
+    created_at: Mapped[datetime] = ts_column(default=utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("token_id", "feature_set_version", "known_at", name="token_version_known"),
+        Index("ix_market_features_category_known", "category", "known_at"),
+    )

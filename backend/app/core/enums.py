@@ -150,3 +150,122 @@ class ResolutionOutcome(str, enum.Enum):
     CANCELLED = "CANCELLED"
     AMBIGUOUS = "AMBIGUOUS"
     UNKNOWN = "UNKNOWN"
+
+
+# ---------------------------------------------------------------------------
+# Phase 1.5: evidence, classification depth, modelability tiers
+# ---------------------------------------------------------------------------
+
+
+class MarketSubcategory(str, enum.Enum):
+    """Finer routing than category. Determines which evidence sources apply.
+
+    A market's category says which model family; its subcategory says which
+    sources to actually query. "Will the Fed cut in September" and "Will CPI
+    exceed 3%" are both MACRO but need different feeds.
+    """
+
+    FED_RATES = "FED_RATES"
+    FED_PERSONNEL = "FED_PERSONNEL"
+    INFLATION = "INFLATION"
+    EMPLOYMENT = "EMPLOYMENT"
+    GDP_GROWTH = "GDP_GROWTH"
+    RECESSION = "RECESSION"
+    TREASURY_YIELDS = "TREASURY_YIELDS"
+
+    CRYPTO_PRICE = "CRYPTO_PRICE"
+    CRYPTO_PROTOCOL = "CRYPTO_PROTOCOL"
+    CRYPTO_REGULATION = "CRYPTO_REGULATION"
+
+    US_PRESIDENTIAL = "US_PRESIDENTIAL"
+    US_CONGRESSIONAL = "US_CONGRESSIONAL"
+    US_PRIMARY = "US_PRIMARY"
+    INTERNATIONAL_ELECTION = "INTERNATIONAL_ELECTION"
+    APPOINTMENT = "APPOINTMENT"
+    LEGISLATION = "LEGISLATION"
+
+    CORPORATE_EARNINGS = "CORPORATE_EARNINGS"
+    CORPORATE_EVENT = "CORPORATE_EVENT"
+
+    UNCLASSIFIED = "UNCLASSIFIED"
+
+
+class EventType(str, enum.Enum):
+    """The shape of the question, which determines how evidence maps to it."""
+
+    THRESHOLD = "THRESHOLD"
+    """A published number crosses a level (CPI > 3%, BTC > $100k)."""
+
+    SCHEDULED_ANNOUNCEMENT = "SCHEDULED_ANNOUNCEMENT"
+    """A known body announces on a known date (FOMC decision, CPI release)."""
+
+    SELECTION = "SELECTION"
+    """One of N candidates is chosen (nominee, appointee)."""
+
+    OCCURRENCE = "OCCURRENCE"
+    """An unscheduled event happens or does not (resignation, invasion)."""
+
+    UNKNOWN = "UNKNOWN"
+
+
+class ResolutionMechanism(str, enum.Enum):
+    """Who or what determines the outcome. Drives resolution risk."""
+
+    OFFICIAL_STATISTIC = "OFFICIAL_STATISTIC"
+    OFFICIAL_ANNOUNCEMENT = "OFFICIAL_ANNOUNCEMENT"
+    MARKET_PRICE = "MARKET_PRICE"
+    ELECTION_AUTHORITY = "ELECTION_AUTHORITY"
+    REGULATORY_FILING = "REGULATORY_FILING"
+    MEDIA_CONSENSUS = "MEDIA_CONSENSUS"
+    DISCRETIONARY = "DISCRETIONARY"
+    UNKNOWN = "UNKNOWN"
+
+
+class ModelabilityTier(str, enum.Enum):
+    """Coarse tier required by the Phase 1.5 spec.
+
+    Sits alongside the existing ModelabilityStatus rather than replacing it:
+    the status drives Phase 1 filtering, the tier drives which probability
+    model may run.
+    """
+
+    HIGH = "HIGH"
+    MEDIUM = "MEDIUM"
+    LOW = "LOW"
+    UNMODELABLE = "UNMODELABLE"
+
+
+class EvidenceType(str, enum.Enum):
+    """What kind of fact an evidence row carries."""
+
+    TIME_SERIES_OBSERVATION = "TIME_SERIES_OBSERVATION"
+    SCHEDULED_EVENT = "SCHEDULED_EVENT"
+    FILING = "FILING"
+    ANNOUNCEMENT = "ANNOUNCEMENT"
+    MARKET_QUOTE = "MARKET_QUOTE"
+    POLL = "POLL"
+    NEWS_ITEM = "NEWS_ITEM"
+    REGISTRY_RECORD = "REGISTRY_RECORD"
+
+
+class SignalStrength(str, enum.Enum):
+    """Graduated signal states required by the Phase 1.5 spec.
+
+    Sits between the raw edge computation and the existing Recommendation
+    enum, so Phase 1 consumers keep working unchanged.
+    """
+
+    NONE = "NONE"
+    WATCH = "WATCH"
+    CANDIDATE = "CANDIDATE"
+    SIGNAL = "SIGNAL"
+
+
+class ConflictResolution(str, enum.Enum):
+    """Why one evidence item won over another."""
+
+    HIGHER_TIER = "HIGHER_TIER"
+    MORE_RECENT = "MORE_RECENT"
+    BETTER_VERIFIED = "BETTER_VERIFIED"
+    MORE_RELIABLE_SOURCE = "MORE_RELIABLE_SOURCE"
+    UNRESOLVED = "UNRESOLVED"

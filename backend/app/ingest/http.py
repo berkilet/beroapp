@@ -184,6 +184,21 @@ class HttpFetcher:
         await self.aclose()
 
     # -- internals ------------------------------------------------------
+    # Per-host request rates for evidence sources. Deliberately well under the
+    # documented ceilings recorded in docs/DATA_SOURCES.md, and defined here
+    # rather than read from the registry so that editing a source definition
+    # cannot inadvertently raise our outbound rate.
+    EVIDENCE_HOST_RPS = {
+        "api.bls.gov": 0.5,
+        "home.treasury.gov": 0.5,
+        "api.fiscaldata.treasury.gov": 1.0,
+        "www.federalreserve.gov": 0.2,
+        "data.sec.gov": 2.0,          # SEC documents 10/s; we use a fifth of it
+        "api.exchange.coinbase.com": 2.0,
+        "api.kraken.com": 0.5,        # Kraken sustains ~1/s; we use half
+        "api.open.fec.gov": 0.2,      # DEMO_KEY allows only 30/hour
+    }
+
     def _rate_for(self, host: str) -> float:
         s = self.settings
         mapping = {
@@ -191,7 +206,9 @@ class HttpFetcher:
             urlparse(s.clob_base_url).hostname: s.clob_rps,
             urlparse(s.data_base_url).hostname: s.data_rps,
         }
-        return mapping.get(host, 1.0)
+        if host in mapping:
+            return mapping[host]
+        return self.EVIDENCE_HOST_RPS.get(host, 0.5)
 
     def _bucket(self, host: str) -> TokenBucket:
         if host not in self._buckets:
@@ -245,6 +262,25 @@ class HttpFetcher:
         return random.uniform(0.0, capped)
 
     # -- public ---------------------------------------------------------
+    async def fetch_text(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        max_retries: int | None = None,
+    ) -> str:
+        """Fetch a non-JSON body (XML feed, structured HTML page).
+
+        Same transport guarantees as fetch_json — allow-list, limiter, breaker,
+        retry — differing only in that the body is not JSON-decoded.
+        """
+        return await self._fetch(
+            url, method=method, params=params, headers=headers,
+            max_retries=max_retries, decode_json=False,
+        )
+
     async def fetch_json(
         self,
         url: str,
@@ -252,6 +288,7 @@ class HttpFetcher:
         method: str = "GET",
         params: dict[str, Any] | None = None,
         json_body: Any | None = None,
+        headers: dict[str, str] | None = None,
         max_retries: int | None = None,
     ) -> Any:
         """Fetch and JSON-decode a response, retrying transient failures.
@@ -259,6 +296,22 @@ class HttpFetcher:
         Raises PermanentFetchError, RetryableFetchError (after exhausting
         retries), or CircuitOpenError. Never returns partial or fabricated data.
         """
+        return await self._fetch(
+            url, method=method, params=params, json_body=json_body,
+            headers=headers, max_retries=max_retries, decode_json=True,
+        )
+
+    async def _fetch(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        params: dict[str, Any] | None = None,
+        json_body: Any | None = None,
+        headers: dict[str, str] | None = None,
+        max_retries: int | None = None,
+        decode_json: bool = True,
+    ) -> Any:
         host = self._check_allowed(url)
         retries = self.settings.http_max_retries if max_retries is None else max_retries
         stats = self._host_stats(host)
@@ -271,7 +324,9 @@ class HttpFetcher:
 
             started = time.monotonic()
             try:
-                response = await self._client.request(method, url, params=params, json=json_body)
+                response = await self._client.request(
+                    method, url, params=params, json=json_body, headers=headers
+                )
             except httpx.TimeoutException as exc:
                 last_error = RetryableFetchError(f"timeout: {exc}", error_code="timeout")
             except httpx.HTTPError as exc:
@@ -301,6 +356,12 @@ class HttpFetcher:
                         error_code=f"http_{response.status_code}",
                         status_code=response.status_code,
                     )
+                elif not decode_json:
+                    breaker.record_success()
+                    stats.success_count += 1
+                    stats.consecutive_failures = 0
+                    stats.last_success_at = time.time()
+                    return response.text
                 else:
                     try:
                         payload = response.json()
