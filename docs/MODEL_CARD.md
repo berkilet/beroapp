@@ -4,8 +4,15 @@
 
 **Type:** interpretable, deterministic log-odds adjustment against the market prior
 **Training data:** none — this model is not fitted
-**Status:** active, and the only active estimator
+**Status:** active; the default estimator, and the only one for most markets
 **Location:** `backend/app/engines/probability.py`
+
+## Models: `v0.2.0-crypto_threshold`, `v0.2.0-macro_threshold`
+
+**Type:** closed-form probability from external evidence, blended with the baseline
+**Training data:** none — these are analytic, not fitted
+**Status:** active where evidence exists; ~235 of 23,167 markets currently qualify
+**Location:** `backend/app/engines/category_models.py`
 
 ---
 
@@ -148,10 +155,13 @@ achievement, it is the entry fee.
 
 Stated in full, because a model card listing only strengths is marketing.
 
-1. **It has no external evidence.** No evidence connector is implemented. Its
-   only independent input is a coherence constraint derived from Polymarket's
-   own prices. It is closer to a market-microstructure filter than a forecasting
-   model, and it should be read that way.
+1. **The baseline still has no external evidence.** Where no category model
+   applies — which is most markets — the only independent input is a coherence
+   constraint derived from Polymarket's own prices. That is closer to a
+   market-microstructure filter than a forecasting model, and it is reported as
+   such: the prediction record carries
+   `independent_estimate.available = false` and the dashboard shows a dash
+   rather than a number.
 
 2. **Neg-risk coherence may not be exploitable.** The sum-to-one violation it
    detects is real, but capturing it generally requires trading several legs
@@ -179,12 +189,89 @@ Stated in full, because a model card listing only strengths is marketing.
    understanding. A market that resolves against us on wording is a failure mode
    this model cannot see.
 
-7. **No category-specific models exist.** The architecture supports them and the
-   schema records a category per model version, but every market currently gets
-   the same estimator regardless of category.
+7. **Category models cover three subcategories out of nineteen.**
+   `CRYPTO_PRICE`, `INFLATION` and `EMPLOYMENT` have independent estimators.
+   Everything else falls back to the baseline. Coverage is limited by which
+   sources are keyless, not by which markets are interesting.
 
 8. **Sports are excluded by policy**, not because they are unmodelable. They are
    dominated by specialist models with data this platform does not have.
+
+---
+
+## Category models
+
+### `v0.2.0-crypto_threshold`
+
+Prices a threshold question on a crypto asset from spot and realised
+volatility, under lognormal diffusion. It is not a fitted model; it is a closed
+form applied to measured inputs.
+
+The part that matters is that it distinguishes four **question shapes**, because
+the same number means different things:
+
+| Shape | Question | Computes |
+|---|---|---|
+| `TERMINAL` | "will BTC be above $65k on the 31st" | P(S_T > K) |
+| `BARRIER_ABOVE` | "will BTC reach $65k" | P(max S_t ≥ K) — first passage |
+| `BARRIER_BELOW` | "will BTC dip to $62k" | P(min S_t ≤ K) — first passage |
+| `RANGE` | "will BTC be between $62k and $64k" | P(K₁ < S_T < K₂) |
+
+This exists because an earlier version of this platform did not make the
+distinction. It read "Will Bitcoin dip to $62,000?" as a terminal question
+about exceeding $62,000, produced 0.80 against a market at 0.26, and reported a
+27-point edge that was entirely an artefact of asking the wrong question. The
+barrier formulas are exact first-passage results for geometric Brownian motion,
+not approximations, and the fix took the edges on that market set from ~25pp to
+3–9pp.
+
+Volatility is horizon-matched: the 30-day realised series for horizons up to
+three weeks, the 90-day series beyond. Using a quarter of history to price a
+five-day question overstated volatility badly.
+
+### `v0.2.0-macro_threshold`
+
+Prices a threshold question on a published macro series — CPI, unemployment,
+payrolls — from the latest observation and the series' own historical monthly
+variability, with the release calendar deciding how many releases fall inside
+the question's window.
+
+### How a category estimate is used
+
+It is **not** substituted for the baseline. The two are combined by
+inverse-variance weighting in log-odds, and the combined result is capped at
+`MAX_DEPARTURE_LOGIT = 1.2` from the market price. A model that wants to
+disagree with a liquid market by more than that is more likely wrong than
+right, and the cap is the assumption that says so out loud.
+
+A category model refuses to run at all when fewer than
+`min_evidence_items_for_model` features came from outside Polymarket. Without
+that check a "category model" can silently degrade into an elaborate
+restatement of the price it is supposed to be checking.
+
+---
+
+## An honest observation about the current crypto signals
+
+Every crypto signal this system currently produces points **SELL**. Across the
+most recent evaluation cycle: 20 signals, all SELL, mean edge −6.2pp, range
+−3.1pp to −12.7pp. Not one BUY.
+
+A systematic one-sided disagreement with the market is far more likely to be a
+model artefact than a discovered edge. Two candidate explanations, neither yet
+tested:
+
+1. Short-dated barrier events really are overpriced on this venue — plausible,
+   since retail flow tends to buy lottery-like outcomes, and the
+   favourite–longshot literature predicts exactly this shape.
+2. Thirty-day *realised* volatility understates forward volatility, so the
+   model systematically judges barriers less likely to be touched than they
+   are. Realised volatility is backward-looking by construction.
+
+Implied volatility from an options venue would separate the two. Until that
+measurement exists, this is recorded as a **known limitation, not a finding**,
+and it is the single strongest argument against acting on any crypto signal
+this system currently produces.
 
 ---
 

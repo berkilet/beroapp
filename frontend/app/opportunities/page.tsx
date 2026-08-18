@@ -25,6 +25,16 @@ interface Opportunity {
   rank_explanation: { contributions?: Record<string, number>; reasons?: string[] } | null;
   signal_at: string;
   hours_to_resolution: number | null;
+  subcategory: string | null;
+  signal_strength: string | null;
+  signal_strength_detail: {
+    strength: string;
+    reasons: string[];
+    gates_passed: string[];
+    gates_failed: string[];
+    has_independent_estimate: boolean;
+    evidence_source_count: number;
+  } | null;
   risk_status: string;
   risk_reasons: string[];
   approved_size_usd: number | null;
@@ -76,6 +86,13 @@ export default async function OpportunitiesPage({
         been executed, simulated or otherwise, and no route in this application can execute it.
       </Notice>
 
+      <Notice tone="warn">
+        Read the <span className="font-mono">Strength</span> column before the edge column. A row
+        marked <span className="font-mono">CANDIDATE</span> has an edge but no independent estimate
+        behind it — the number came from rearranging the market&apos;s own price, not from outside
+        evidence. Only <span className="font-mono">SIGNAL</span> means every gate cleared.
+      </Notice>
+
       <Panel
         title="Filters"
         subtitle="edit the URL query to filter: min_edge, min_confidence, min_liquidity, category, recommendation, max_hours_to_resolution"
@@ -121,6 +138,8 @@ export default async function OpportunitiesPage({
             headers={[
               'Market',
               'Category',
+              'Subcategory',
+              'Strength',
               'Market P',
               'Model P',
               'Raw edge',
@@ -147,6 +166,16 @@ export default async function OpportunitiesPage({
                 </Td>
                 <Td>
                   <Badge value={o.market.category} muted />
+                </Td>
+                <Td>
+                  <Badge value={o.subcategory} muted />
+                </Td>
+                {/* SIGNAL means every evidence gate cleared. CANDIDATE means the
+                    edge is there but the outside information is not. */}
+                <Td>
+                  <span title={(o.signal_strength_detail?.gates_failed ?? []).join(', ')}>
+                    <Badge value={o.signal_strength} />
+                  </span>
                 </Td>
                 <Td mono>{pct(o.market_probability)}</Td>
                 <Td mono>{pct(o.model_probability)}</Td>

@@ -133,7 +133,7 @@ optimism.
 | `STALE` | Has not reported within 3× its expected interval |
 | `FAILED` | Last cycle failed outright |
 | `UNKNOWN` | Never reported — this component has not run |
-| `DISABLED` | Deliberately off (an evidence source with no connector) |
+| `DISABLED` | Deliberately off — no connector, or a required credential is absent |
 
 `UNKNOWN` is never silently upgraded to `HEALTHY`.
 
@@ -148,6 +148,28 @@ Roughly, on the default cadence:
   skipping them is the intended behaviour, not a fault.
 * `PROBABILITY_ENGINE` reports every 5 minutes.
 * Data age below `DATA_STALENESS_S` (300s).
+
+### Evidence sources
+
+The data-sources page is the place to check the evidence layer. Three things
+there are worth reading in order:
+
+1. **Enabled sources**, e.g. `6 / 14`. A source is disabled when it has no
+   connector or when a required credential is absent — both are normal, and the
+   `usage_notes` column says which.
+2. **Newest evidence**, per source. This, not the cumulative item count, is the
+   health signal: a source with thousands of items and nothing new in two days
+   is broken.
+3. **Budget today**, e.g. `2 / 25` for BLS. Approaching the cap means the
+   connector will start refusing calls — which is the intended behaviour, but it
+   is worth knowing before the evidence goes stale.
+
+Two credentials change what runs, and neither ships with a fallback:
+
+| Variable | Effect when absent |
+|---|---|
+| `SEC_USER_AGENT` | SEC EDGAR reports `DISABLED`. SEC policy requires a declared, contactable User-Agent, so the connector refuses rather than sending an anonymous request. |
+| `FEC_API_KEY` | FEC reports `DISABLED`. It does *not* fall back to the shared public `DEMO_KEY` — 30 requests/hour is too tight for continuous polling, and pointing a 24/7 worker at a shared demo credential is poor citizenship. |
 
 On a fresh install the `GLOBAL_KILL_SWITCH` is tripped, which is correct: it
 fails closed until an operator clears it. Phase 1 emits recommendations

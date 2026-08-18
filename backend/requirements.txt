@@ -11,6 +11,7 @@ pydantic-settings==2.7.0
 SQLAlchemy==2.0.36
 alembic==1.14.0
 psycopg[binary]==3.2.3
+defusedxml==0.7.1
 httpx==0.28.1
 numpy==2.2.1
 pandas==2.2.3

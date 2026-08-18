@@ -195,7 +195,39 @@ class Settings(BaseSettings):
 
     # Optional evidence-source keys. Absent -> connector reports DISABLED.
     fred_api_key: SecretStr = SecretStr("")
+    bea_api_key: SecretStr = SecretStr("")
+    bls_api_key: SecretStr = SecretStr("")
+    fec_api_key: SecretStr = SecretStr("")
     sec_user_agent: str = ""
+    """SEC policy requires a declared, contactable User-Agent. The SEC connector
+    refuses to run without one rather than sending an anonymous request."""
+
+    evidence_user_agent: str = "beroapp-research/0.1 (self-hosted prediction-market research)"
+
+    # ------------------------------------------------------------------
+    # Evidence pipeline
+    # ------------------------------------------------------------------
+    evidence_interval_s: int = 1_800
+    evidence_staleness_multiplier: float = 3.0
+    evidence_max_age_days: int = 400
+    feature_set_version: str = "fs-1.0.0"
+
+    min_evidence_items_for_model: int = 2
+    """Below this, a category model must not claim an independent estimate; the
+    engine falls back to the market-anchored baseline and says so."""
+
+    min_category_training_observations: int = 150
+    """Per-category minimum before a learned model may be trained. Deliberately
+    lower than the global 500 because pooling incompatible categories to reach a
+    round number is worse than training per category on less data."""
+
+    # Signal thresholds (spec 26). Configurable, not baked in.
+    candidate_edge_threshold: float = 0.03
+    signal_edge_threshold: float = 0.05
+    candidate_confidence_threshold: float = 0.60
+    signal_confidence_threshold: float = 0.70
+    signal_min_liquidity: float = 10_000.0
+    signal_min_evidence_sources: int = 2
 
     # ------------------------------------------------------------------
     # Phase gate thresholds
@@ -268,14 +300,26 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     @property
     def allowed_outbound_hosts(self) -> frozenset[str]:
-        """SSRF allow-list. The HTTP client refuses any other host."""
+        """SSRF allow-list. The HTTP client refuses any other host.
+
+        Composed of the Polymarket hosts plus every evidence source that has an
+        implemented connector. Derived from the source registry rather than
+        maintained as a second list, so a source cannot be reachable without
+        also being declared, and a source removed from the registry genuinely
+        loses reachability.
+        """
         from urllib.parse import urlparse
 
         hosts = {
             urlparse(u).hostname
             for u in (self.gamma_base_url, self.clob_base_url, self.data_base_url)
         }
-        return frozenset(h for h in hosts if h)
+
+        # Imported lazily: the registry imports enums which import nothing from
+        # config, but keeping it local avoids any future import cycle.
+        from app.evidence.registry import allowed_evidence_hosts
+
+        return frozenset(h for h in hosts if h) | allowed_evidence_hosts()
 
     @property
     def snapshot_token_budget(self) -> int:

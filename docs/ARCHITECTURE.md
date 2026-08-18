@@ -75,11 +75,22 @@ backs off, and retries.
    staleness detection         →  DATA feed health
 
  prediction         every PREDICTION_INTERVAL_S (default 300s)
-   feature assembly (known_at filtered)
-   probability engine  →  predictions
-   edge engine         →  signals
-   risk engine         →  risk_decisions
-   paper engine        →  paper_orders, paper_fills, positions
+   deep classification   →  subcategory, event type, resolution mechanism
+   question-shape detection (terminal / barrier / range)
+   feature assembly (known_at filtered)  →  market_features
+   category model        →  independent estimate, where evidence supports one
+   probability engine    →  predictions (baseline, blended with the above)
+   edge engine           →  signals
+   signal-strength gates →  WATCH / CANDIDATE / SIGNAL
+   risk engine           →  risk_decisions
+   paper engine          →  paper_orders, paper_fills, positions
+
+ evidence           every EVIDENCE_INTERVAL_S
+   seven Tier-1 connectors  →  external_events (append-only, three timestamps)
+   budget reservation       →  refuses rather than exceeding a published cap
+   market matching          →  market_evidence_links, with a reason per link
+   conflict detection       →  evidence_conflicts, resolved by precedence
+   source health refresh    →  external_sources.health
 
  resolution         every RESOLUTION_INTERVAL_S (default 1800s)
    Gamma closed/resolved status + UMA fields  →  resolutions
@@ -156,6 +167,24 @@ The last term matters: absent genuine external evidence the model should mostly
 agree with the market, and the baseline is built so that it *does*. A model that
 disagrees loudly with the market on no evidence is not clever, it is broken.
 
+**Layer 1.5 — category models.** Where a real-world quantity can be measured,
+a subcategory-specific estimator prices the question from that quantity rather
+than from the market. `v0.2.0-crypto_threshold` prices threshold and barrier
+questions on crypto assets from spot and horizon-matched realised volatility
+under lognormal diffusion; `v0.2.0-macro_threshold` does the same for published
+macro series. Both are analytic, not fitted.
+
+Three properties keep this from becoming self-deception:
+
+* A category model **refuses to run** when fewer than
+  `MIN_EVIDENCE_ITEMS_FOR_MODEL` features came from outside Polymarket. A model
+  looking only at the price it claims to beat is not an independent estimate.
+* Its output is **blended, not substituted** — inverse-variance weighted with
+  the baseline in log-odds, then capped at 1.2 logits from the market price.
+* The question's **shape** is detected separately from its threshold, because
+  "will BTC reach $65k" (a barrier) and "will BTC be above $65k on the 31st"
+  (a terminal level) have materially different answers from the same number.
+
 **Layer 2 — calibrated statistical models.** `scikit-learn` logistic regression
 and gradient-boosted trees with isotonic/Platt calibration, trained only on
 resolved markets via walk-forward splits. These become active only once
@@ -195,11 +224,13 @@ Prompt injection.
 
 ## 8. Data model
 
-Twenty tables, grouped:
+Twenty-three tables, grouped:
 
 * **Universe:** `events`, `markets`, `market_tokens`
 * **Market data:** `market_snapshots`, `order_book_snapshots`, `trades`
-* **Evidence:** `external_sources`, `external_events`
+* **Evidence:** `external_sources`, `external_events`, `market_evidence_links`,
+  `evidence_conflicts`
+* **Features:** `market_features`
 * **Decisions:** `predictions`, `signals`, `risk_decisions`
 * **Simulation:** `paper_orders`, `paper_fills`, `positions`, `portfolio_snapshots`
 * **Outcome:** `resolutions`
@@ -208,6 +239,14 @@ Twenty tables, grouped:
 
 Design rules:
 
+* Evidence carries **three** timestamps, not two: `observation_date` (the
+  period a figure describes), `published_at` (when the issuing body released
+  it) and `known_at` (when this platform could first use it). Collapsing any
+  pair of them reintroduces look-ahead. Evidence rows are append-only; a
+  revision is a new row plus a `superseded_by_id` pointer, never an update.
+* `market_evidence_links` is a join table rather than a foreign key on the
+  evidence row, because one CPI release bears on every inflation market at
+  once.
 * Every fact-bearing row has both an *event time* and a `known_at`. The
   backtester filters exclusively on `known_at`, which is what makes look-ahead
   bias structurally impossible rather than merely discouraged.

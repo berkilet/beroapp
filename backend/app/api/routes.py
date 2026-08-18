@@ -29,7 +29,10 @@ from app.core.config import get_settings
 from app.core.enums import KillSwitch, SystemComponent
 from app.db.models import (
     AuditLog,
+    EvidenceConflict,
+    ExternalEvent,
     ExternalSource,
+    MarketEvidenceLink,
     Market,
     MarketSnapshot,
     MarketToken,
@@ -229,6 +232,11 @@ def _market_summary(market: Market) -> dict:
         "volume_24hr": market.volume_24hr,
         "end_date": market.end_date.isoformat() if market.end_date else None,
         "neg_risk": market.neg_risk,
+        "subcategory": market.subcategory,
+        "event_type": market.event_type,
+        "resolution_mechanism": market.resolution_mechanism,
+        "modelability_tier": market.modelability_tier,
+        "evidence_available": market.evidence_available,
     }
 
 
@@ -294,7 +302,35 @@ def market_detail(market_id: int, session: DbSession, _: Viewer) -> dict:
 
     latest = snapshots[0] if snapshots else None
 
+    evidence_rows = session.execute(
+        select(MarketEvidenceLink, ExternalEvent, ExternalSource)
+        .join(ExternalEvent, ExternalEvent.id == MarketEvidenceLink.evidence_id)
+        .join(ExternalSource, ExternalSource.id == ExternalEvent.source_id)
+        .where(MarketEvidenceLink.market_id == market_id)
+        .order_by(desc(MarketEvidenceLink.relevance), desc(ExternalEvent.known_at))
+        .limit(40)
+    ).all()
+
     return {
+        "evidence": [
+            {
+                "relevance": link.relevance,
+                "match_reason": link.match_reason,
+                "source": source.name,
+                "source_tier": event.source_tier,
+                "series_key": event.series_key,
+                "title": event.title,
+                "numeric_value": event.numeric_value,
+                "unit": event.unit,
+                "observation_date": (
+                    event.observation_date.isoformat() if event.observation_date else None
+                ),
+                "known_at": event.known_at.isoformat(),
+                "reference_url": event.reference_url,
+                "verification_status": event.verification_status,
+            }
+            for link, event, source in evidence_rows
+        ],
         "market": {
             **_market_summary(market),
             # Untrusted venue text. The frontend renders it as a text node.
@@ -304,6 +340,7 @@ def market_detail(market_id: int, session: DbSession, _: Viewer) -> dict:
             "outcomes": market.outcomes,
             "uma_resolution_statuses": market.uma_resolution_statuses,
             "modelability_detail": market.modelability_detail,
+            "classification_detail": market.classification_detail,
             "tick_size": market.tick_size,
             "order_min_size": market.order_min_size,
             "start_date": market.start_date.isoformat() if market.start_date else None,
@@ -390,6 +427,22 @@ def _snapshot_payload(s: MarketSnapshot | None) -> dict | None:
 # ---------------------------------------------------------------------------
 # Opportunities & predictions
 # ---------------------------------------------------------------------------
+def _signal_strength_value(signal: Signal) -> str | None:
+    """The graded strength as a plain string, or None if never assessed.
+
+    Signals written before Phase 1.5 have no assessment at all, and one written
+    by an older build stored the bare string rather than the object. Both must
+    read back as something rather than raising.
+    """
+    stored = (signal.rank_explanation or {}).get("signal_strength")
+    if isinstance(stored, str):
+        return stored
+    if isinstance(stored, dict):
+        value = stored.get("strength")
+        return value if isinstance(value, str) else None
+    return None
+
+
 def _signal_payload(s: Signal) -> dict:
     return {
         "id": s.id,
@@ -432,9 +485,30 @@ def opportunities(
 ) -> dict:
     cutoff = datetime.now(UTC) - timedelta(hours=24)
 
+    # Only the newest signal per token. The prediction worker writes a fresh row
+    # every cycle, so a token that read BUY an hour ago and NO_TRADE five
+    # minutes ago has both rows in the window — and showing the older one as a
+    # live opportunity is presenting a superseded view as current. It matters
+    # most exactly when it is most misleading: after a model fix, the wrong
+    # answer is the one that survives in the table.
+    latest = (
+        select(
+            Signal.token_id.label("token_id"),
+            func.max(Signal.signal_at).label("signal_at"),
+        )
+        .where(Signal.signal_at >= cutoff)
+        .group_by(Signal.token_id)
+        .subquery()
+    )
+
     stmt = (
         select(Signal, Market, RiskDecision)
         .join(Market, Market.id == Signal.market_id)
+        .join(
+            latest,
+            (Signal.token_id == latest.c.token_id)
+            & (Signal.signal_at == latest.c.signal_at),
+        )
         .outerjoin(RiskDecision, RiskDecision.signal_id == Signal.id)
         .where(Signal.signal_at >= cutoff, Signal.confidence >= min_confidence)
     )
@@ -468,6 +542,12 @@ def opportunities(
                     if market.end_date
                     else None
                 ),
+                "subcategory": market.subcategory,
+                # The stored assessment is the whole object, gates included.
+                # The scalar is lifted out so a consumer can filter on it
+                # without having to know the shape of the detail.
+                "signal_strength": _signal_strength_value(signal),
+                "signal_strength_detail": (signal.rank_explanation or {}).get("signal_strength"),
                 "risk_status": risk.status if risk else "NOT_EVALUATED",
                 "risk_reasons": risk.reasons if risk else [],
                 "approved_size_usd": risk.approved_size_usd if risk else None,
@@ -521,6 +601,7 @@ def list_predictions(
                 "model_latency_ms": p.model_latency_ms,
                 "feature_snapshot": p.feature_snapshot,
                 "rationale": p.rationale,
+                "independent_estimate": (p.rationale or {}).get("independent_estimate"),
                 "input_refs": p.input_refs,
             }
             for p, question, category in rows
@@ -654,8 +735,33 @@ def model_health(session: DbSession, _: Viewer) -> dict:
     versions = list(session.execute(select(ModelVersion)).scalars())
     resolved_count = session.execute(select(func.count()).select_from(Resolution)).scalar_one()
 
+    from app.backtest.walkforward import load_observations, training_readiness
+    from app.engines.category_models import CategoryModelRouter
+
+    router_models = CategoryModelRouter(settings)
+    evidence_total = session.execute(select(func.count()).select_from(ExternalEvent)).scalar_one()
+    linked_markets = session.execute(
+        select(func.count(func.distinct(MarketEvidenceLink.market_id)))
+    ).scalar_one()
+
     return {
         "active_versions": [settings.baseline_model_version],
+        "category_models": {
+            "implemented": [s.value for s in router_models.implemented_subcategories],
+            "note": (
+                "A category model runs only where genuine external evidence exists. "
+                "Everything else falls back to the market-anchored baseline, which is "
+                "not an independent forecast and is reported as such."
+            ),
+        },
+        "evidence": {
+            "items_stored": int(evidence_total),
+            "markets_with_linked_evidence": int(linked_markets),
+            "min_features_for_model": settings.min_evidence_items_for_model,
+        },
+        "training_readiness_by_category": training_readiness(
+            load_observations(session), settings=settings
+        ),
         "registered_versions": [
             {
                 "model_id": v.model_id,
@@ -734,6 +840,19 @@ def data_sources(session: DbSession, _: Viewer) -> dict:
         (s for s in feed_status if s.component == SystemComponent.DATA_FEED.value), None
     )
 
+    evidence_counts = dict(
+        session.execute(
+            select(ExternalEvent.source_id, func.count(ExternalEvent.id))
+            .group_by(ExternalEvent.source_id)
+        ).all()
+    )
+    newest = dict(
+        session.execute(
+            select(ExternalEvent.source_id, func.max(ExternalEvent.known_at))
+            .group_by(ExternalEvent.source_id)
+        ).all()
+    )
+
     return {
         "polymarket": polymarket,
         "market_data_feed_health": data_feed.as_dict() if data_feed else None,
@@ -759,9 +878,101 @@ def data_sources(session: DbSession, _: Viewer) -> dict:
                     else None
                 ),
                 "usage_notes": r.usage_notes,
+                "terms_url": r.terms_url,
+                "access_method": r.access_method,
+                "update_frequency_s": r.update_frequency_s,
+                "daily_request_budget": r.daily_request_budget,
+                "requests_today": r.requests_today,
+                "evidence_items": int(evidence_counts.get(r.id, 0)),
+                "newest_evidence_at": (
+                    newest[r.id].isoformat() if newest.get(r.id) else None
+                ),
+                "categories": r.categories,
             }
             for r in rows
         ],
+        "totals": {
+            "evidence_items": int(sum(evidence_counts.values())),
+            "enabled_sources": sum(1 for r in rows if r.enabled),
+            "declared_sources": len(rows),
+        },
+    }
+
+
+@router.get("/api/evidence")
+def evidence(
+    session: DbSession,
+    _: Viewer,
+    market_id: int | None = None,
+    series_key: Annotated[str | None, Query(max_length=96)] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> dict:
+    """Stored evidence, optionally scoped to one market or one series."""
+    stmt = select(ExternalEvent, ExternalSource).join(
+        ExternalSource, ExternalSource.id == ExternalEvent.source_id
+    )
+    if market_id is not None:
+        stmt = stmt.join(
+            MarketEvidenceLink, MarketEvidenceLink.evidence_id == ExternalEvent.id
+        ).where(MarketEvidenceLink.market_id == market_id)
+    if series_key:
+        stmt = stmt.where(ExternalEvent.series_key == _clean_search_term(series_key))
+
+    rows = session.execute(
+        stmt.order_by(desc(ExternalEvent.known_at)).limit(limit)
+    ).all()
+
+    conflicts = list(
+        session.execute(
+            select(EvidenceConflict).order_by(desc(EvidenceConflict.detected_at)).limit(25)
+        ).scalars()
+    )
+
+    return {
+        "count": len(rows),
+        "items": [
+            {
+                "id": event.id,
+                "source": source.name,
+                "source_key": source.source_key,
+                "source_tier": event.source_tier,
+                "evidence_type": event.evidence_type,
+                "series_key": event.series_key,
+                "title": event.title,
+                "numeric_value": event.numeric_value,
+                "unit": event.unit,
+                "observation_date": (
+                    event.observation_date.isoformat() if event.observation_date else None
+                ),
+                "published_at": event.published_at.isoformat() if event.published_at else None,
+                "known_at": event.known_at.isoformat(),
+                "verification_status": event.verification_status,
+                "reliability_score": event.reliability_score,
+                "reference_url": event.reference_url,
+                "superseded": event.superseded_by_id is not None,
+                "parser_version": event.parser_version,
+            }
+            for event, source in rows
+        ],
+        "conflicts": [
+            {
+                "series_key": c.series_key,
+                "observation_date": (
+                    c.observation_date.isoformat() if c.observation_date else None
+                ),
+                "resolution": c.resolution,
+                "spread": c.spread,
+                "candidates": c.candidates,
+                "detail": c.resolution_detail,
+                "detected_at": c.detected_at.isoformat(),
+            }
+            for c in conflicts
+        ],
+        "notice": (
+            "Evidence is stored append-only. A revision is a new row plus a "
+            "superseded pointer; observation_date, published_at and known_at are "
+            "kept distinct so a replay cannot use a figure before it existed."
+        ),
     }
 
 

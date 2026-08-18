@@ -21,15 +21,22 @@ before a real order could be placed.
 | Phase | What runs | Status |
 |---|---|---|
 | **Phase 1** — prediction engine | discovery, snapshots, classification, modelability, probability, edge, risk, resolution, calibration | **working** |
+| **Phase 1.5** — evidence & independent probability | seven Tier-1 evidence connectors, evidence→market matching, conflict resolution, category probability models, signal-strength gating, replay + walk-forward validation | **working**, with the coverage limits below |
 | **Phase 2** — shadow trading | paper execution against recorded books, portfolio, P&L, drawdown | engine and adapter implemented and tested; **not enabled** (requires the Phase 1 gate) |
 | **Phase 3** — live trading | isolated live adapter | **architectural capability only, deliberately not implemented** |
 
 What this system does **not** yet have, and you should know before running it:
 
-* **No external evidence is ingested.** The source registry, provenance schema
-  and health reporting exist, but no connector is written. The only genuinely
-  independent signal the model has is Polymarket's own neg-risk coherence
-  constraint. Everything else defers to the market. See `docs/DATA_SOURCES.md`.
+* **External evidence covers three subcategories, not nineteen.** Seven
+  keyless Tier-1 connectors are implemented — Treasury (two), BLS, the FOMC
+  calendar, SEC EDGAR, Coinbase and Kraken — and independent category models
+  exist for `CRYPTO_PRICE`, `INFLATION` and `EMPLOYMENT`. That is roughly 235
+  of 23,167 tracked markets. For every other market the estimate is anchored to
+  the market price and reports itself as such. See `docs/DATA_SOURCES.md`.
+* **Every crypto signal currently points SELL.** A systematic one-sided
+  disagreement is more likely a model artefact than an edge; the two candidate
+  explanations and the measurement that would separate them are written up in
+  `docs/MODEL_CARD.md`. Do not read it as a discovered opportunity.
 * **No trained model.** Learned estimators activate only after
   `MIN_TRAINING_OBSERVATIONS` (default 500) markets have resolved. Until then
   the interpretable baseline is the only estimator, by design — an untrained
@@ -52,7 +59,21 @@ What this system does **not** yet have, and you should know before running it:
  modelability filter ── most markets are excluded, with reasons
         │
         ▼
- probability engine ── independent estimate + uncertainty
+ deep classification ── subcategory, event type, resolution mechanism,
+        │                question shape (terminal / barrier / range)
+        ▼
+ feature assembly ────── market features + external evidence, known_at filtered
+        │                ▲
+        │                └── evidence worker: 7 Tier-1 connectors, append-only,
+        │                    three timestamps, conflicts resolved by precedence
+        ▼
+ category model ─────── independent estimate, or an explicit refusal when the
+        │                evidence is too thin to support one
+        ▼
+ probability engine ── baseline, blended with the above, capped near the market
+        │
+        ▼
+ signal-strength gates ── WATCH / CANDIDATE / SIGNAL, each gate named
         │
         ▼
  edge engine ── raw → executable → liquidity-adjusted → risk-adjusted
@@ -129,7 +150,7 @@ For 24/7 operation with automatic restart after reboot, see
 
 ```bash
 cd backend
-.venv/bin/pytest                      # 295 tests
+.venv/bin/pytest                      # 422 tests
 bash ../scripts/security_scan.sh      # tests, bandit, pip-audit, ruff, secret scan
 PYTHONPATH=. .venv/bin/python scripts/phase_gate.py --target 2
 ```
@@ -149,13 +170,18 @@ backend/
     ingest/      hardened HTTP client, Polymarket client, persistence
     schemas/     strict validation for untrusted venue data
     engines/     classification, modelability, liquidity, probability, edge,
-                 risk, kill switches, authorization, calibration
+                 risk, kill switches, authorization, calibration,
+                 features, category models
+    evidence/    source registry, connectors, store, matching, conflicts,
+                 deep classification, question shape, signal strength
+    backtest/    replay runner, walk-forward splitter
     execution/   paper adapter; live adapter that refuses to construct
-    workers/     supervisor + discovery, snapshot, prediction, resolution, metrics
+    workers/     supervisor + discovery, snapshot, prediction, evidence,
+                 resolution, metrics
     api/         read-only FastAPI surface, auth, security middleware, health
   scripts/       phase_gate.py, seed.py
   tests/         unit, integration, security
-frontend/        Next.js dashboard, 13 pages
+frontend/        Next.js dashboard, 14 pages
 ops/             launchd jobs, database grants
 scripts/         backup, restore, security scan
 docs/            architecture, data sources, security, phase gates, operations,
@@ -171,7 +197,9 @@ fails if they stop holding.
 
 1. **No fabricated data.** A value that is unknown is stored and displayed as
    unknown. Nullable numeric columns mean "not measured", never zero.
-2. **No look-ahead bias.** Every fact-bearing row carries `known_at`, and the
+2. **No look-ahead bias.** Every fact-bearing row carries `known_at`; evidence
+   carries three timestamps so that the period a figure describes, its
+   publication and our knowledge of it stay distinct. The
    prediction path filters on it. A backtest runs the same code with an earlier
    `as_of`, so look-ahead is structurally impossible rather than merely avoided.
 3. **No survivorship bias.** Closed, resolved, cancelled and invalid markets are
@@ -187,6 +215,17 @@ fails if they stop holding.
 7. **Resolution is never inferred from price.** A market at 0.995 is a market at
    0.995. An unclear settlement is recorded `AMBIGUOUS` and excluded from
    calibration rather than guessed.
+8. **No manufactured signals.** A category model refuses to run when its
+   features came only from Polymarket, and `SIGNAL` requires six named gates
+   including corroboration by more than one outside source. A system whose
+   usual answer is "no trade" is working, not broken.
+9. **No source reached that is not declared.** The SSRF allow-list is derived
+   from the same registry tuple the dashboard renders, so an undeclared host is
+   unreachable rather than merely unused — and a declared source without a
+   connector contributes no reachable host at all.
+10. **Published rate limits are budgets, not suggestions.** BLS allows 25
+    keyless queries a day; consumption is tracked in the database and the
+    connector refuses the call rather than exceeding it.
 
 ---
 
@@ -199,7 +238,7 @@ fails if they stop holding.
 | [SECURITY.md](docs/SECURITY.md) | Threat model, the money-loss boundary, prompt-injection defence, and an honest list of limitations |
 | [PHASE_GATES.md](docs/PHASE_GATES.md) | What must be true before a phase advances, and what passing does not mean |
 | [OPERATIONS.md](docs/OPERATIONS.md) | Install, 24/7 setup, health checks, backup and restore, troubleshooting |
-| [MODEL_CARD.md](docs/MODEL_CARD.md) | What the baseline does, what it cannot do, and its known failure modes |
+| [MODEL_CARD.md](docs/MODEL_CARD.md) | What the baseline and the category models do, what they cannot do, and their known failure modes — including why every current crypto signal points the same way |
 | [BACKTESTING.md](docs/BACKTESTING.md) | How look-ahead and survivorship bias are prevented, and walk-forward methodology |
 
 ---

@@ -21,6 +21,7 @@ its BUY calls cannot tell you whether its filters were doing anything.
 
 from __future__ import annotations
 
+import hashlib
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -32,6 +33,7 @@ from app.core.config import Settings, get_settings
 from app.core.enums import (
     ComponentHealth,
     MarketCategory,
+    MarketSubcategory,
     ModelabilityStatus,
     Recommendation,
     RiskStatus,
@@ -41,6 +43,7 @@ from app.core.logging import get_correlation_id, get_logger
 from app.db.models import (
     AuditLog,
     Market,
+    MarketFeatures,
     MarketSnapshot,
     MarketToken,
     OrderBookSnapshot,
@@ -58,7 +61,12 @@ from app.engines.probability import (
     ProbabilityEngine,
     ProbabilityInputs,
 )
+from app.engines.category_models import CategoryModelRouter
+from app.engines.features import FeatureBuilder
 from app.engines.risk import PortfolioState, RiskEngine
+from app.evidence.classify import classify_deep, modelability_tier
+from app.evidence.question_shape import detect_shape
+from app.evidence.signal_strength import assess_signal_strength
 from app.ingest.repository import record_system_event
 from app.schemas.polymarket import BookLevel, OrderBook
 from app.core.enums import Side
@@ -91,6 +99,8 @@ class PredictionWorker:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self.probability = ProbabilityEngine(self.settings)
+        self.features = FeatureBuilder(self.settings)
+        self.category_models = CategoryModelRouter(self.settings)
         self.edge = EdgeEngine(self.settings)
         self.risk = RiskEngine(self.settings)
         self.kill_switches = KillSwitchEvaluator(self.settings)
@@ -114,6 +124,8 @@ class PredictionWorker:
             "skipped_no_data": 0,
             "recommendations": defaultdict(int),
             "risk_outcomes": defaultdict(int),
+            "signal_strengths": defaultdict(int),
+            "independent_estimates": 0,
         }
 
         with session_scope() as session:
@@ -163,9 +175,13 @@ class PredictionWorker:
                 stats["signals_written"] += 1
                 stats["recommendations"][outcome[0].value] += 1
                 stats["risk_outcomes"][outcome[1].value] += 1
+                stats["signal_strengths"][outcome[2]] += 1
+                if outcome[3]:
+                    stats["independent_estimates"] += 1
 
             stats["recommendations"] = dict(stats["recommendations"])
             stats["risk_outcomes"] = dict(stats["risk_outcomes"])
+            stats["signal_strengths"] = dict(stats["signal_strengths"])
             stats["kill_switches_tripped"] = [s.value for s in switches.tripped_switches]
 
             record_system_event(
@@ -516,7 +532,7 @@ class PredictionWorker:
         as_of: datetime,
         portfolio: PortfolioState,
         switches: KillSwitchReport,
-    ) -> tuple[Recommendation, RiskStatus] | None:
+    ) -> tuple[Recommendation, RiskStatus, str, bool] | None:
         if ctx.profile.midpoint is None:
             return None
 
@@ -528,6 +544,55 @@ class PredictionWorker:
         )
         exec_price = executable_probability(
             ctx.book, side=Side.BUY, size_usd=self.settings.reference_order_size_usd
+        )
+
+        # -- Phase 1.5: deep classification, features, independent estimate ---
+        classification = classify_deep(
+            question=ctx.market.question,
+            description=ctx.market.description,
+            category=MarketCategory(ctx.market.category),
+        )
+        subcategory = (
+            classification.subcategory
+            if classification.subcategory is not MarketSubcategory.UNCLASSIFIED
+            else None
+        )
+
+        shape_for_features = (
+            detect_shape(ctx.market.question)
+            if subcategory is MarketSubcategory.CRYPTO_PRICE
+            else None
+        )
+
+        feature_vector = self.features.build(
+            session,
+            market=ctx.market,
+            token_id=ctx.token.token_id,
+            profile=ctx.profile,
+            executable_price=exec_price,
+            snapshot_count=ctx.snapshot_count,
+            as_of=as_of,
+            subcategory=subcategory,
+            asset=classification.asset,
+            threshold=(
+                shape_for_features.threshold
+                if shape_for_features is not None
+                else classification.threshold_value
+            ),
+            threshold_direction=classification.threshold_direction,
+        )
+
+        # Price questions need their *shape* as well as their level: a barrier
+        # question and a terminal question with the same number have materially
+        # different answers.
+        shape = shape_for_features
+
+        category_estimate = self.category_models.estimate(
+            feature_vector,
+            subcategory=subcategory,
+            threshold=classification.threshold_value,
+            direction=classification.threshold_direction,
+            shape=shape,
         )
 
         prediction = self.probability.predict(
@@ -543,8 +608,11 @@ class PredictionWorker:
                 negrisk_group_sum=ctx.negrisk_group_sum,
                 negrisk_group_size=ctx.negrisk_group_size,
                 data_received_at=ctx.snapshot.known_at,
-            )
+            ),
+            category_estimate=category_estimate,
         )
+
+        self._persist_features(session, feature_vector)
 
         predicted_at = datetime.now(UTC)
         data_latency_ms = int((predicted_at - ctx.snapshot.known_at).total_seconds() * 1000)
@@ -564,12 +632,16 @@ class PredictionWorker:
             known_at=predicted_at,
             data_latency_ms=max(0, data_latency_ms),
             model_latency_ms=prediction.rationale.get("model_latency_ms"),
-            feature_snapshot=prediction.features,
+            feature_snapshot={**prediction.features, **feature_vector.features},
             input_refs={
                 "market_snapshot_id": ctx.snapshot.id,
                 "order_book_snapshot_id": ctx.book_snapshot_id,
                 "snapshot_known_at": ctx.snapshot.known_at.isoformat(),
                 "as_of": as_of.isoformat(),
+                "feature_set_version": feature_vector.version,
+                "evidence_ids": feature_vector.evidence_ids,
+                "missing_features": feature_vector.missing,
+                "oldest_feature_age_s": feature_vector.oldest_feature_age_s(as_of),
             },
             rationale={**prediction.rationale, "adjustments": prediction.adjustments},
             resolution_risk=prediction.resolution_risk.value,
@@ -581,7 +653,23 @@ class PredictionWorker:
             prediction=prediction, book=ctx.book, profile=ctx.profile
         )
 
-        signal_row = self._persist_signal(session, ctx, prediction_row, edge_result, predicted_at)
+        strength = assess_signal_strength(
+            edge_result=edge_result,
+            category_estimate=category_estimate,
+            feature_vector=feature_vector,
+            settings=self.settings,
+        )
+
+        self._persist_classification(
+            ctx.market,
+            classification=classification,
+            feature_vector=feature_vector,
+            has_independent_estimate=strength.has_independent_estimate,
+        )
+
+        signal_row = self._persist_signal(
+            session, ctx, prediction_row, edge_result, predicted_at, strength
+        )
 
         correlation_group = ctx.market.neg_risk_market_id or (
             f"event:{ctx.market.event_id}" if ctx.market.event_id else None
@@ -619,6 +707,9 @@ class PredictionWorker:
                     "model_probability": prediction.model_probability,
                     "recommendation": edge_result.recommendation.value,
                     "executable_edge": edge_result.executable_edge,
+                    "signal_strength": strength.strength.value,
+                    "independent_estimate": strength.has_independent_estimate,
+                    "evidence_source_count": strength.evidence_source_count,
                 },
                 confidence=prediction.confidence,
                 edge=edge_result.executable_edge,
@@ -631,7 +722,83 @@ class PredictionWorker:
             )
         )
 
-        return edge_result.recommendation, risk_result.status
+        return (
+            edge_result.recommendation,
+            risk_result.status,
+            strength.strength.value,
+            strength.has_independent_estimate,
+        )
+
+    def _persist_classification(
+        self,
+        market: Market,
+        *,
+        classification,
+        feature_vector,
+        has_independent_estimate: bool,
+    ) -> None:
+        """Cache the classification and the modelability tier on the market row.
+
+        Ownership is split by column, not by worker, because the two workers
+        cover different market sets and know different things:
+
+        * subcategory / event_type / resolution_mechanism / detail — written by
+          both this worker and the evidence worker. They cannot disagree:
+          `classify_deep` is a pure function of the same three inputs. Writing
+          it here matters because the evidence worker only reaches the most
+          liquid few hundred markets per cycle, while this one evaluates every
+          modelable market.
+        * `evidence_available` — the evidence worker only, since it is the one
+          that creates the links.
+        * `modelability_tier` — this worker only, since HIGH depends on whether
+          a category model actually produced an estimate, which is not known
+          until the model has run.
+
+        `evidence_feature_count` counts features sourced from outside
+        Polymarket. A market whose features all come from its own order book
+        has no outside evidence, whatever is linked to it.
+        """
+        market.subcategory = (
+            classification.subcategory.value
+            if classification.subcategory is not MarketSubcategory.UNCLASSIFIED
+            else None
+        )
+        market.event_type = classification.event_type.value
+        market.resolution_mechanism = classification.resolution_mechanism.value
+        market.classification_detail = classification.as_detail()
+        market.modelability_tier = modelability_tier(
+            classification=classification,
+            modelability_status=market.modelability_status,
+            has_independent_estimate=has_independent_estimate,
+            evidence_feature_count=feature_vector.evidence_feature_count(),
+        ).value
+
+    def _persist_features(self, session: Session, vector) -> None:
+        """Materialise the feature vector so training and replay share one matrix.
+
+        Idempotent on (token, version, known_at); a re-run of the same cycle
+        writes nothing new.
+        """
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        session.execute(
+            pg_insert(MarketFeatures)
+            .values(
+                market_id=vector.market_id,
+                token_id=vector.token_id,
+                category=vector.category.value,
+                subcategory=vector.subcategory.value if vector.subcategory else None,
+                feature_set_version=vector.version,
+                known_at=vector.known_at,
+                features=vector.features,
+                feature_timestamps=vector.timestamps,
+                evidence_ids=vector.evidence_ids,
+                missing_features=vector.missing,
+            )
+            .on_conflict_do_nothing(
+                index_elements=["token_id", "feature_set_version", "known_at"]
+            )
+        )
 
     def _persist_signal(
         self,
@@ -640,12 +807,21 @@ class PredictionWorker:
         prediction_row: Prediction,
         edge_result: EdgeResult,
         signal_at: datetime,
+        strength=None,
     ) -> Signal:
         # Idempotency: one signal per (token, model, recommendation, minute).
         # Re-running a cycle cannot create a duplicate, which matters because
         # the worker may restart mid-cycle.
+        #
+        # Hashed rather than concatenated: a token id is 77 characters and a
+        # combined model version can be arbitrarily long, so the readable form
+        # overflowed the column as soon as category models started contributing
+        # to the version string. A digest is bounded whatever the inputs become.
         bucket = signal_at.strftime("%Y%m%d%H%M")
-        key = f"{ctx.token.token_id}:{edge_result.model_version}:{edge_result.recommendation.value}:{bucket}"
+        key = hashlib.sha256(
+            f"{ctx.token.token_id}:{edge_result.model_version}:"
+            f"{edge_result.recommendation.value}:{bucket}".encode()
+        ).hexdigest()
 
         existing = session.execute(
             select(Signal).where(Signal.idempotency_key == key)
@@ -677,6 +853,7 @@ class PredictionWorker:
             rank_explanation={
                 **edge_result.rank_explanation,
                 "reasons": edge_result.reasons,
+                "signal_strength": strength.as_dict() if strength is not None else None,
             },
             signal_at=signal_at,
             idempotency_key=key,

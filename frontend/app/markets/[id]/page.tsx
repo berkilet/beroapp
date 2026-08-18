@@ -27,7 +27,27 @@ interface Detail {
     tick_size: number | null;
     first_seen_at: string;
     untrusted_text_notice: string;
+    subcategory: string | null;
+    event_type: string | null;
+    resolution_mechanism: string | null;
+    modelability_tier: string | null;
+    evidence_available: boolean | null;
+    classification_detail: Record<string, unknown> | null;
   };
+  evidence: {
+    relevance: number;
+    match_reason: string;
+    source: string;
+    source_tier: number;
+    series_key: string | null;
+    title: string | null;
+    numeric_value: number | null;
+    unit: string | null;
+    observation_date: string | null;
+    known_at: string;
+    reference_url: string | null;
+    verification_status: string;
+  }[];
   current: {
     best_bid: number | null;
     best_ask: number | null;
@@ -90,8 +110,11 @@ export default async function MarketDetailPage({ params }: { params: Promise<{ i
         <h1 className="text-lg font-semibold text-gray-100">{m.question ?? `Market ${m.id}`}</h1>
         <div className="mt-2 flex flex-wrap gap-2">
           <Badge value={m.category} muted />
+          {m.subcategory && <Badge value={m.subcategory} muted />}
+          {m.event_type && <Badge value={m.event_type} muted />}
           <Badge value={m.status} muted />
           <Badge value={m.modelability_status} />
+          {m.resolution_mechanism && <Badge value={m.resolution_mechanism} muted />}
         </div>
       </header>
 
@@ -140,6 +163,71 @@ export default async function MarketDetailPage({ params }: { params: Promise<{ i
             <p className="mt-1 font-mono text-gray-300">{m.resolved_by || '—'}</p>
           </div>
         </div>
+      </Panel>
+
+      <Panel
+        title="Linked evidence"
+        subtitle={
+          data.evidence.length > 0
+            ? `${data.evidence.length} external observations judged relevant to this question`
+            : undefined
+        }
+        right={
+          /* Three states, not two: null means the evidence worker has not
+             reached this market yet, which is not the same as having looked
+             and found nothing. */
+          <Badge
+            value={
+              m.evidence_available === null
+                ? 'NOT_ASSESSED'
+                : m.evidence_available
+                  ? 'EVIDENCE'
+                  : 'NO_EVIDENCE'
+            }
+          />
+        }
+      >
+        {data.evidence.length === 0 ? (
+          <Empty
+            message={
+              m.evidence_available === null
+                ? 'The evidence worker has not assessed this market yet — it works through the ' +
+                  'most liquid markets first. Nothing has been ruled out; nothing has been found.'
+                : 'No external evidence is linked to this market. Without it the model has ' +
+                  'nothing to go on but the market price, so any probability shown is anchored ' +
+                  'to that price rather than independent of it.'
+            }
+          />
+        ) : (
+          <Table
+            headers={['Series', 'Value', 'Observation', 'Known at', 'Source', 'Tier', 'Status', 'Relevance', 'Why linked']}
+          >
+            {data.evidence.map((e, i) => (
+              <tr key={i}>
+                <Td mono>
+                  {e.reference_url ? (
+                    <a href={e.reference_url} className="text-info hover:underline" rel="noreferrer noopener" target="_blank">
+                      {e.series_key ?? e.title ?? 'item'}
+                    </a>
+                  ) : (
+                    (e.series_key ?? e.title ?? 'item')
+                  )}
+                </Td>
+                <Td mono>
+                  {e.numeric_value === null ? '—' : num(e.numeric_value, 4)}
+                  {e.unit && <span className="ml-1 text-muted">{e.unit}</span>}
+                </Td>
+                <Td mono><span className="text-muted">{e.observation_date?.slice(0, 10) ?? '—'}</span></Td>
+                <Td mono><span className="text-muted">{ago(e.known_at)}</span></Td>
+                <Td>{e.source}</Td>
+                <Td mono>{e.source_tier}</Td>
+                <Td><Badge value={e.verification_status} /></Td>
+                <Td mono>{num(e.relevance, 2)}</Td>
+                <Td><span className="text-[11px] text-muted">{e.match_reason}</span></Td>
+              </tr>
+            ))}
+          </Table>
+        )}
       </Panel>
 
       {mod && (
@@ -215,12 +303,21 @@ export default async function MarketDetailPage({ params }: { params: Promise<{ i
         {data.prediction_history.length === 0 ? (
           <Empty message="No predictions recorded for this market." />
         ) : (
-          <Table headers={['When', 'Market P', 'Model P', 'Edge', 'Confidence', 'Uncertainty', 'Model', 'Adjustments']}>
+          <Table headers={['When', 'Market P', 'Model P', 'Independent', 'Edge', 'Confidence', 'Uncertainty', 'Model', 'Adjustments']}>
             {[...data.prediction_history].reverse().slice(0, 40).map((p, i) => (
               <tr key={i}>
                 <Td mono><span className="text-muted">{ago(p.predicted_at)}</span></Td>
                 <Td mono>{pct(p.market_probability)}</Td>
                 <Td mono>{pct(p.model_probability)}</Td>
+                {/* The category model's own view, before blending. A dash means
+                    the row is the market restated, not a competing forecast. */}
+                <Td mono>
+                  {p.rationale?.independent_estimate?.available ? (
+                    pct(p.rationale.independent_estimate.probability)
+                  ) : (
+                    <span className="text-muted">—</span>
+                  )}
+                </Td>
                 <Td><EdgeCell value={p.model_probability - p.market_probability} /></Td>
                 <Td mono>{pct(p.confidence, 0)}</Td>
                 <Td mono>{num(p.model_uncertainty, 3)}</Td>
