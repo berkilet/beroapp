@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Daily backup at 03:15 local time. Replace __HOME__ before installing.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.beroapp.backup</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/beroapp/scripts/backup.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__HOME__/beroapp</string>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key><integer>3</integer>
+        <key>Minute</key><integer>15</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/beroapp/logs/backup.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/beroapp/logs/backup.error.log</string>
+</dict>
+</plist>

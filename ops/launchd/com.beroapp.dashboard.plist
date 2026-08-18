@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Dashboard: Next.js server. Run `npm run build` before loading this job.
+  Replace __HOME__ with your home directory before installing.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.beroapp.dashboard</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>npm</string>
+        <string>run</string>
+        <string>start</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__HOME__/beroapp/frontend</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>15</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/beroapp/logs/dashboard.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/beroapp/logs/dashboard.error.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

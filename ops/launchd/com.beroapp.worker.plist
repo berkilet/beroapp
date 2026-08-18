@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Worker: all ingestion and computation. This is the process that must run 24/7.
+
+  Install:
+    cp ops/launchd/com.beroapp.worker.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.beroapp.worker.plist
+
+  KeepAlive restarts it on crash; RunAtLoad starts it after a reboot. The
+  worker waits for PostgreSQL itself rather than crash-looping, so ordering
+  between the two jobs does not need to be guaranteed.
+
+  Replace __HOME__ with your home directory before installing.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.beroapp.worker</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/beroapp/backend/.venv/bin/python</string>
+        <string>-m</string>
+        <string>app.workers.main</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__HOME__/beroapp/backend</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+        <key>LOG_LEVEL</key>
+        <string>INFO</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <!-- Do not hammer a restart loop if startup is failing. -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>ExitTimeOut</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/beroapp/logs/worker.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/beroapp/logs/worker.error.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
