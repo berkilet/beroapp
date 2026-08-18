@@ -34,6 +34,10 @@ from app.engines.liquidity import (
 from app.engines.probability import ProbabilityResult
 from app.schemas.polymarket import OrderBook
 
+_PRICE_EPSILON = 1e-9
+"""Tolerance for comparing prices against configured limits, absorbing binary-
+float representation error without admitting a materially worse fill."""
+
 # Multiplier applied to risk-adjusted edge by resolution risk. A market that
 # might resolve against us on a technicality is worth materially less than its
 # arithmetic suggests.
@@ -165,7 +169,7 @@ class EdgeEngine:
                 estimate=estimate, fees=fees,
             )
 
-        if estimate.slippage > self.settings.max_allowed_slippage:
+        if estimate.slippage > self.settings.max_allowed_slippage + _PRICE_EPSILON:
             reasons.append(
                 f"estimated slippage {estimate.slippage:.4f} exceeds the "
                 f"{self.settings.max_allowed_slippage} limit"

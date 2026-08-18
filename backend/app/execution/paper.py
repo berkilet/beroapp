@@ -28,6 +28,13 @@ from app.engines.authorization import ExecutionToken, verify_token
 from app.engines.liquidity import estimate_execution
 from app.schemas.polymarket import OrderBook
 
+_PRICE_EPSILON = 1e-9
+"""Tolerance for comparing prices against configured limits.
+
+Polymarket ticks are 0.001 at the finest, so a nanoprice of slack cannot admit
+a materially worse fill; it only absorbs binary-float representation error.
+"""
+
 
 @dataclass
 class SimulatedFill:
@@ -104,7 +111,10 @@ class PaperExecutionAdapter:
             fill_price - signal_price if side is Side.BUY else signal_price - fill_price
         )
 
-        if realised_slippage > self.settings.max_allowed_slippage:
+        # Compared with a tolerance because these are binary-float prices:
+        # 0.45 - 0.43 evaluates to 0.020000000000000018, which would otherwise
+        # reject a fill that is exactly at the configured limit.
+        if realised_slippage > self.settings.max_allowed_slippage + _PRICE_EPSILON:
             return SimulatedFill(
                 state=OrderState.REJECTED,
                 side=side,

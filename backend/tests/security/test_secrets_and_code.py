@@ -15,7 +15,7 @@ import re
 import pytest
 
 from app.core.config import Settings
-from app.core.logging import JsonFormatter, configure_logging, redact
+from app.core.logging import configure_logging, redact
 
 APP_ROOT = pathlib.Path(__file__).resolve().parents[2] / "app"
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -171,12 +171,10 @@ def test_no_shell_or_eval_in_application_code() -> None:
     assert not offenders, f"dangerous constructs found: {offenders}"
 
 
-# The only two places SQL text is formatted rather than parameter-bound. Both
-# interpolate values that cannot come from a request:
-#   api/main.py     — table names from a fixed tuple in the same function
-#   db/session.py   — SET statement_timeout, which PostgreSQL will not accept as
-#                     a bind parameter; the value is int()-coerced first
-SQL_INTERPOLATION_EXEMPTIONS = {"api/main.py", "db/session.py"}
+# The only place SQL text is formatted rather than parameter-bound:
+#   db/session.py — SET statement_timeout, which PostgreSQL will not accept as a
+#                   bind parameter; the value is int()-coerced first.
+SQL_INTERPOLATION_EXEMPTIONS = {"db/session.py"}
 
 
 def test_no_raw_sql_string_interpolation() -> None:
@@ -203,11 +201,10 @@ def test_exempted_sql_interpolation_cannot_take_request_input() -> None:
         "the statement_timeout interpolation must int()-coerce its value"
     )
 
+    # /metrics counts rows through mapped table objects; there must be no
+    # dynamic SQL there at all.
     main_src = (APP_ROOT / "api" / "main.py").read_text()
-    assert 'SELECT count(*) FROM {table}' in main_src
-    assert "for table in (" in main_src, (
-        "the /metrics table name must come from a literal tuple, not a variable"
-    )
+    assert "FROM {" not in main_src, "/metrics reintroduced dynamic SQL"
 
 
 def test_no_verify_false_anywhere() -> None:

@@ -13,7 +13,7 @@ from __future__ import annotations
 import functools
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Phase = Literal["PHASE_1", "PHASE_2", "PHASE_3"]

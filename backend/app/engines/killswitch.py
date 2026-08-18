@@ -12,7 +12,7 @@ worker cycle. GLOBAL is operator-controlled and is never cleared by code.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session

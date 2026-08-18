@@ -16,21 +16,19 @@ import httpx
 import pytest
 import respx
 
-from app.core.enums import KillSwitch, MarketCategory, Recommendation, Side
+from app.core.enums import KillSwitch, MarketCategory, Recommendation
 from app.engines.edge import EdgeEngine
 from app.engines.killswitch import KillSwitchEvaluator, RiskState
-from app.engines.liquidity import estimate_execution, profile_book
+from app.engines.liquidity import profile_book
 from app.engines.probability import (
     BaselineProbabilityModel,
     InvalidModelOutput,
     ProbabilityInputs,
-    validate_probability,
 )
 from app.ingest.http import (
     CircuitOpenError,
     HttpFetcher,
     PermanentFetchError,
-    RateLimitedError,
     RetryableFetchError,
 )
 from app.ingest.polymarket import PolymarketClient

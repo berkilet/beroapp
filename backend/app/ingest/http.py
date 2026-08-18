@@ -20,7 +20,7 @@ import ipaddress
 import random
 import socket
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 

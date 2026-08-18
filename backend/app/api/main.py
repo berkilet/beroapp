@@ -17,7 +17,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, PlainTextResponse
-from sqlalchemy import text
+from sqlalchemy import func, select
 
 from app.api.health import component_statuses, data_freshness, overall_health
 from app.api.routes import router
@@ -29,9 +29,38 @@ from app.api.security import (
 from app.core.config import get_settings
 from app.core.enums import ComponentHealth
 from app.core.logging import configure_logging, get_correlation_id, get_logger
-from app.db.session import database_reachable, get_engine, session_scope
+from app.db.models import (
+    AuditLog,
+    MarketSnapshot,
+    Market,
+    OrderBookSnapshot,
+    PaperFill,
+    PaperOrder,
+    Prediction,
+    Resolution,
+    RiskDecision,
+    Signal,
+    SystemEvent,
+)
+from app.db.session import database_reachable, session_scope
 
 log = get_logger("api.main")
+
+# Tables whose row counts are exported. A fixed list of mapped classes, so the
+# metric surface cannot be widened by a request.
+_METRIC_TABLES = (
+    Market,
+    MarketSnapshot,
+    OrderBookSnapshot,
+    Prediction,
+    Signal,
+    RiskDecision,
+    Resolution,
+    PaperOrder,
+    PaperFill,
+    SystemEvent,
+    AuditLog,
+)
 
 
 @asynccontextmanager
@@ -173,15 +202,18 @@ def _install_health_routes(app: FastAPI) -> None:
             )
 
         lines: list[str] = []
-        with get_engine().connect() as conn:
-            for table in (
-                "markets", "market_snapshots", "order_book_snapshots",
-                "predictions", "signals", "risk_decisions", "resolutions",
-                "paper_orders", "paper_fills", "system_events", "audit_logs",
-            ):
-                # Table names come from this fixed tuple, never from a request.
-                count = conn.execute(text(f"SELECT count(*) FROM {table}")).scalar_one()
-                lines.append(f'beroapp_rows_total{{table="{table}"}} {count}')
+        # Counted through mapped table objects rather than by formatting a name
+        # into SQL. The old form was safe (names came from a literal tuple) but
+        # it is better not to have a dynamic-SQL construct in the tree at all
+        # than to have one plus a comment explaining why it is fine.
+        with session_scope() as session:
+            for model in _METRIC_TABLES:
+                count = session.execute(
+                    select(func.count()).select_from(model)
+                ).scalar_one()
+                lines.append(
+                    f'beroapp_rows_total{{table="{model.__tablename__}"}} {count}'
+                )
 
         with session_scope() as session:
             for status_row in component_statuses(session):

@@ -243,29 +243,44 @@ schema and the source-registry service.
 | Component | Status |
 |---|---|
 | `external_sources` / `external_events` tables with full provenance columns | IMPLEMENTED |
-| Source registry with tier + reliability score | IMPLEMENTED (seeded) |
-| Tier-1 connector: US Treasury fiscal data | IMPLEMENTED |
-| Tier-1 connector: FRED | IMPLEMENTED (requires a free API key; disabled when absent) |
-| Tier-1 connector: SEC EDGAR | IMPLEMENTED (requires declared UA per SEC policy) |
-| Tier-2/3/4 connectors | **NOT IMPLEMENTED** — registry entries exist, no ingestion code |
+| Source registry with tier + reliability score, seeded by `scripts/seed.py` | IMPLEMENTED |
+| Data-sources page reporting per-source health and ENABLED/DISABLED | IMPLEMENTED |
+| **Any external-evidence ingestion connector** | **NOT IMPLEMENTED** |
 
-No connector is counted as working unless it is listed IMPLEMENTED above. The
-platform does not fabricate evidence for markets it has no connector for; such
-markets receive `INSUFFICIENT_DATA` and are excluded from tradeable status.
+To be unambiguous: **no external evidence source is currently ingested.** The
+registry rows below exist so the framework is visible and so a connector can be
+added without redesigning the schema, but every one of them reports `DISABLED`
+on the data-sources page, and `external_events` is empty on a running system.
+
+The consequence is stated plainly rather than glossed: the probability engine
+presently has no external evidence, so its only genuinely independent signal is
+the neg-risk coherence constraint, which is derived from Polymarket's own
+prices. Markets outside the evidence-supported categories are capped at
+`WATCHLIST` and never reach `TRADEABLE`, because a probability formed without
+evidence is a repackaging of the market price rather than an independent
+estimate.
+
+The platform does not fabricate evidence for markets it has no connector for.
 
 ### 2.1 Tier 1 — primary / authoritative
 
 | Source | URL | Category | Access | Frequency | Licensing note | Fallback |
 |---|---|---|---|---|---|---|
-| U.S. Treasury Fiscal Data | https://fiscaldata.treasury.gov/api-documentation/ | Macro | Public REST JSON, no key | Daily | Public domain, no key required | none |
-| FRED (St. Louis Fed) | https://fred.stlouisfed.org/docs/api/fred/ | Macro | REST, **free API key required** | Daily | Free registration; series-level terms vary by originating agency | Treasury / BLS |
-| SEC EDGAR submissions & company facts | https://www.sec.gov/search-filings/edgar-application-programming-interfaces | Companies | Public REST JSON | Daily | SEC requires a declared `User-Agent` with contact info and ≤10 req/s | none |
-| Federal Reserve / FOMC calendar | https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm | Fed | Public | On publication | Public domain | none |
-| BLS | https://www.bls.gov/developers/ | Macro | REST, optional key | On release | Registration raises quota | FRED |
-| BEA | https://apps.bea.gov/api/ | Macro | REST, free key | On release | Free registration | FRED |
+All rows below are **registered but not implemented**. They record which
+sources have been assessed as acceptable to use, on what terms, so that adding
+one is a matter of writing a connector rather than re-doing the assessment.
 
-FRED, BLS and BEA keys are **optional**. When a key is absent the connector is
-reported as `DISABLED` on the data-sources page rather than silently returning
+| Source | URL | Category | Access | Licensing note | Status |
+|---|---|---|---|---|---|
+| U.S. Treasury Fiscal Data | https://fiscaldata.treasury.gov/api-documentation/ | Macro | Public REST JSON, no key | Public domain | registered, no connector |
+| FRED (St. Louis Fed) | https://fred.stlouisfed.org/docs/api/fred/ | Macro | REST, free API key | Free registration; series terms vary by originating agency | registered, no connector |
+| SEC EDGAR submissions & company facts | https://www.sec.gov/search-filings/edgar-application-programming-interfaces | Companies | Public REST JSON | SEC requires a declared `User-Agent` with contact info and ≤10 req/s | registered, no connector |
+| Federal Reserve / FOMC calendar | https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm | Fed | Public | Public domain | registered, no connector |
+| BLS | https://www.bls.gov/developers/ | Macro | REST, optional key | Registration raises quota | registered, no connector |
+| BEA | https://apps.bea.gov/api/ | Macro | REST, free key | Free registration | registered, no connector |
+
+When a connector is eventually added, a source whose required key is absent must
+report `DISABLED` on the data-sources page rather than silently returning
 nothing.
 
 ### 2.2 Tier 2 — high-quality secondary

@@ -1,6 +1,10 @@
-# Runtime dependencies. Pinned to exact versions for reproducibility.
-# Regenerate the hashed lock with: pip-compile --generate-hashes (see OPERATIONS.md)
-fastapi==0.115.6
+# Runtime dependencies, pinned to exact versions for reproducibility.
+# Audited with pip-audit; see scripts/security_scan.sh.
+#
+# starlette is pinned explicitly rather than left to fastapi's floor: the
+# transitive version fastapi accepted carried seven known advisories.
+fastapi==0.141.1
+starlette==1.6.0
 uvicorn[standard]==0.34.0
 pydantic==2.10.4
 pydantic-settings==2.7.0
