@@ -234,75 +234,137 @@ listed as DEGRADED-capability, not as a delivered feature.
 ## 2. External evidence sources
 
 The probability engine's design separates *market data* (Polymarket) from
-*evidence* (everything else). The evidence-source framework — tiering,
-reliability scoring, `known_at` provenance — is implemented in the database
-schema and the source-registry service.
+*evidence* (everything else). Phase 1.5 implemented the evidence layer: seven
+connectors against Tier-1 sources, all keyless, all verified against live
+endpoints on 2026-08-18 before any code was written against them.
 
-### Implementation status, stated honestly
+`app/evidence/registry.py` is the single declaration of every source the
+platform may use. `scripts/seed.py` pushes that declaration into the database;
+it does not carry a list of its own. The registry also derives the SSRF
+allow-list, so a source without a connector is not merely unused — its host is
+not reachable from this application at all.
+
+### 2.1 Implementation status
 
 | Component | Status |
 |---|---|
-| `external_sources` / `external_events` tables with full provenance columns | IMPLEMENTED |
-| Source registry with tier + reliability score, seeded by `scripts/seed.py` | IMPLEMENTED |
-| Data-sources page reporting per-source health and ENABLED/DISABLED | IMPLEMENTED |
-| **Any external-evidence ingestion connector** | **NOT IMPLEMENTED** |
+| `external_sources` / `external_events` with full provenance columns | IMPLEMENTED |
+| Source registry: tier, reliability, budget, terms, parser version | IMPLEMENTED |
+| Per-source health, circuit breaking, daily budget enforcement | IMPLEMENTED |
+| Seven Tier-1 connectors (below) | IMPLEMENTED |
+| Evidence → market matching with a recorded reason per link | IMPLEMENTED |
+| Conflict detection and precedence-based resolution | IMPLEMENTED |
+| Tier 2–4 connectors (news, polling, social) | NOT IMPLEMENTED |
+| FRED, BEA (require a key this deployment does not hold) | NOT IMPLEMENTED |
 
-To be unambiguous: **no external evidence source is currently ingested.** The
-registry rows below exist so the framework is visible and so a connector can be
-added without redesigning the schema, but every one of them reports `DISABLED`
-on the data-sources page, and `external_events` is empty on a running system.
+### 2.2 Tier 1 — implemented connectors
 
-The consequence is stated plainly rather than glossed: the probability engine
-presently has no external evidence, so its only genuinely independent signal is
-the neg-risk coherence constraint, which is derived from Polymarket's own
-prices. Markets outside the evidence-supported categories are capped at
-`WATCHLIST` and never reach `TRADEABLE`, because a probability formed without
-evidence is a repackaging of the market price rather than an independent
-estimate.
+All verified 2026-08-18. "Frequency" is how often the worker polls; where a
+source publishes a daily cap, the platform tracks consumption in the database
+and refuses the call rather than exceeding it.
 
-The platform does not fabricate evidence for markets it has no connector for.
-
-### 2.1 Tier 1 — primary / authoritative
-
-| Source | URL | Category | Access | Frequency | Licensing note | Fallback |
-|---|---|---|---|---|---|---|
-All rows below are **registered but not implemented**. They record which
-sources have been assessed as acceptable to use, on what terms, so that adding
-one is a matter of writing a connector rather than re-doing the assessment.
-
-| Source | URL | Category | Access | Licensing note | Status |
+| Source | Endpoint | Access | Frequency | Documented limit | Terms |
 |---|---|---|---|---|---|
-| U.S. Treasury Fiscal Data | https://fiscaldata.treasury.gov/api-documentation/ | Macro | Public REST JSON, no key | Public domain | registered, no connector |
-| FRED (St. Louis Fed) | https://fred.stlouisfed.org/docs/api/fred/ | Macro | REST, free API key | Free registration; series terms vary by originating agency | registered, no connector |
-| SEC EDGAR submissions & company facts | https://www.sec.gov/search-filings/edgar-application-programming-interfaces | Companies | Public REST JSON | SEC requires a declared `User-Agent` with contact info and ≤10 req/s | registered, no connector |
-| Federal Reserve / FOMC calendar | https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm | Fed | Public | Public domain | registered, no connector |
-| BLS | https://www.bls.gov/developers/ | Macro | REST, optional key | Registration raises quota | registered, no connector |
-| BEA | https://apps.bea.gov/api/ | Macro | REST, free key | Free registration | registered, no connector |
+| U.S. Treasury daily yield curve | `home.treasury.gov/.../pages/xml` | XML feed, no key | 6 h | none published | [terms](https://home.treasury.gov/utility/terms-of-use) |
+| U.S. Treasury Fiscal Data | `api.fiscaldata.treasury.gov` | REST JSON, no key | 12 h | none published | [docs](https://fiscaldata.treasury.gov/api-documentation/) |
+| U.S. Bureau of Labor Statistics | `api.bls.gov/publicAPI/v2` | REST JSON, no key | 6 h | **25 queries/day** unregistered | [FAQ](https://www.bls.gov/developers/api_faqs.htm) |
+| Federal Reserve FOMC calendar | `federalreserve.gov/monetarypolicy/fomccalendars.htm` | HTML, structured parse | 24 h | none published | [disclaimer](https://www.federalreserve.gov/aboutthefed/legal-disclaimer.htm) |
+| SEC EDGAR | `data.sec.gov` | REST JSON, no key | 6 h | 10 req/s, declared User-Agent required | [webmaster FAQ](https://www.sec.gov/os/webmaster-faq#developers) |
+| Coinbase Exchange | `api.exchange.coinbase.com` | REST JSON, no key | 5 min | ~10 req/s per IP | [docs](https://docs.cdp.coinbase.com/exchange/docs/welcome) |
+| Kraken | `api.kraken.com` | REST JSON, no key | 5 min | ~1 req/s sustained | [docs](https://docs.kraken.com/api/) |
 
-When a connector is eventually added, a source whose required key is absent must
-report `DISABLED` on the data-sources page rather than silently returning
-nothing.
+Notes that shaped the implementation rather than decorating it:
 
-### 2.2 Tier 2 — high-quality secondary
+* **BLS's 25/day cap drove the whole connector design.** Every series the
+  platform wants is batched into a single POST — the v2 API accepts 25 series
+  per query — and the worker runs four times a day, consuming four of the
+  twenty-five. The remaining budget is headroom for retries. Consumption is
+  recorded in `external_sources.requests_today` and reset daily; when it is
+  exhausted the connector refuses rather than trying anyway.
+* **SEC requires a declared, contactable User-Agent.** Without `SEC_USER_AGENT`
+  set, the connector refuses to run and the source reports `DISABLED`. It does
+  not fall back to an anonymous request.
+* **FOMC is an HTML page, not an API.** The parser reads meeting dates from the
+  calendar's structure and stores dates only — never prose, never a rate
+  expectation inferred from commentary.
+* **Two crypto venues, cross-checked.** Coinbase is primary; Kraken's spot is
+  ingested independently so a disagreement between them is detectable rather
+  than invisible. Binance was probed and returns HTTP 451 from this
+  deployment's egress, so it is not used.
+* **FEC is implemented but disabled.** It requires a key. The connector
+  deliberately does *not* fall back to the shared public `DEMO_KEY`: 30
+  requests/hour is too tight for continuous polling, and pointing a 24/7 worker
+  at a shared demo credential is poor citizenship. Without `FEC_API_KEY` it
+  raises `missing_api_key` and the source reports `DISABLED`.
 
-Reuters, AP, Bloomberg, FT, WSJ, BBC. **No connector implemented.** Several of
-these prohibit automated redistribution or require paid licensing; per the
-zero-cost requirement none has been integrated. Where a public RSS feed exists
-and its terms permit, a future connector would store headline + link + timestamp
-only, never full article text, and would classify every item as
-`REPORTED_INFORMATION`, never `CONFIRMED_FACT`.
+### 2.3 What is actually collected
 
-### 2.3 Tier 3 — specialist / research
+| Source | Series | Example keys |
+|---|---|---|
+| Treasury yield curve | 8 | `UST_YIELD_3M`, `UST_YIELD_2Y`, `UST_YIELD_10Y` |
+| Treasury Fiscal Data | 16 | debt-to-the-penny and related fiscal series |
+| BLS | 4 | `CPI_URBAN_ALL`, `CPI_CORE`, `UNEMPLOYMENT_RATE`, `NONFARM_PAYROLLS` |
+| FOMC calendar | 1 | `FOMC_MEETING` (dates only) |
+| SEC EDGAR | 24 | `SEC_FILING_<TICKER>_<FORM>` metadata |
+| Coinbase | 15 | `CRYPTO_SPOT_*`, `CRYPTO_VOL30_*`, `CRYPTO_VOL_*` |
+| Kraken | 5 | `CRYPTO_SPOT_*` (cross-check) |
 
-Academic and polling sources. **No connector implemented.**
+Two realised-volatility windows are stored per asset, not one. A 90-day window
+priced a five-day question badly; the feature builder now picks the 30-day
+series for horizons up to three weeks and the 90-day series beyond that.
 
-### 2.4 Tier 4 — social / unverified
+### 2.4 Tier 1 — declared, no connector
 
-**No connector implemented, and none is planned for Phase 1.** If added, items
-would be stored with `source_type='social_media'` and
-`verification_status='unverified'`, and the schema forbids an unverified item
-from raising a claim's status to `CONFIRMED_FACT` (enforced in
-`engines/evidence.py`).
+| Source | Why not implemented |
+|---|---|
+| FRED | Requires a free key; verified to return HTTP 400 without one. The series this platform needs are available keyless from BLS and Treasury. Worth adding if a key is configured — FRED's coverage is far broader. |
+| BEA | Requires a free key. GDP markets are rare on the venue. |
+
+### 2.5 Tier 2 — high-quality secondary
+
+Reuters and AP are declared and disabled. Both require licensing for automated
+redistribution, which the zero-cost constraint excludes. If either were added,
+items would be stored as `REPORTED_INFORMATION` and could never be promoted to
+`CONFIRMED_FACT`.
+
+### 2.6 Tier 3 — polling aggregators
+
+Declared and disabled. Terms differ per publisher and must be assessed one at a
+time; there is no single aggregator whose licence covers the others. The
+registry entry deliberately names an unroutable host so that nothing can reach
+a real publisher through it before a specific one is chosen and documented.
+
+### 2.7 Tier 4 — social / unverified
+
+Declared, disabled, and not planned. If added, every item would be stored
+`UNVERIFIED`, could never be promoted to `CONFIRMED_FACT`, and — per the
+Phase 1.5 requirement — could never independently raise a signal. It would be
+an early warning to go and check a Tier-1 source, nothing more.
+
+### 2.8 Matching evidence to markets
+
+Evidence is linked to markets through `market_evidence_links`, a many-to-many
+table rather than a foreign key on the evidence row, because the relationship
+genuinely is many-to-many: one CPI release bears on every inflation market at
+once.
+
+Routing is by subcategory (`app/evidence/matching.py`), and every link records
+*why* it was made — `primary_series:FED_RATES`, `supporting_series:INFLATION` —
+along with a relevance score. A market with no route gets no link; the matcher
+returns nothing rather than a low score, so "we found nothing relevant" and "we
+found something barely relevant" stay distinguishable.
+
+### 2.9 Conflicts
+
+Where two sources report the same fact for the same period and disagree by more
+than 0.5% relatively, the disagreement is recorded in `evidence_conflicts` and
+resolved by a fixed precedence ladder: higher tier, then better verification
+status, then more recent, then more reliable source. If none of those separates
+the candidates the conflict is stored `UNRESOLVED` and neither value is used.
+
+Values are **never averaged**. Two sources disagreeing about a published
+statistic means one of them is wrong, and the mean of a right answer and a wrong
+answer is a third wrong answer that looks more trustworthy than either.
 
 ---
 
@@ -311,13 +373,36 @@ from raising a claim's status to `CONFIRMED_FACT` (enforced in
 Every row in `external_events` carries:
 
 `source_id`, `source_type`, `source_tier`, `reference_url`, `published_at`,
-`ingested_at`, `known_at`, `verification_status`, `reliability_score`,
-`parser_version`, `content_hash`.
+`observation_date`, `ingested_at`, `known_at`, `verification_status`,
+`reliability_score`, `parser_version`, `content_hash`, `superseded_by_id`.
 
-`known_at` is the timestamp the platform may first legitimately use the datum;
-it is `max(published_at, ingested_at)` and it is what the backtester filters on.
-Rows are append-only: a correction is a new row with a new `content_hash`, never
-an update to the old row.
+### Three timestamps, kept separate
+
+| Column | Means |
+|---|---|
+| `observation_date` | the period the figure describes — July's CPI |
+| `published_at` | when the issuing body released it — mid-August |
+| `known_at` | when this platform could first legitimately use it |
+
+Conflating the first two lets a backtest "know" July's inflation during July.
+Conflating the last two lets it know a figure before it was published. Every
+read path filters on `known_at <= as_of`, and `EvidenceItem` refuses at
+construction time to accept a `published_at` later than its `known_at`.
+
+`known_at` is set by the code that learns the fact, never by a database
+default — a `now()` default would silently stamp a backfilled row with the time
+of the backfill, which is exactly the look-ahead these three columns exist to
+prevent. There is a test asserting the column has no server default.
+
+### Revisions
+
+Rows are append-only. A revision is a new row plus a `superseded_by_id` pointer
+on the old one, never an update in place, so what we believed at the time stays
+answerable. The dashboard dims superseded rows rather than hiding them.
+
+`content_hash` covers the *fact* — series, period, value — and deliberately
+excludes `known_at`, so re-fetching the same figure deduplicates while a genuine
+revision does not.
 
 ---
 
@@ -330,3 +415,9 @@ an update to the old row.
 * No use of an LLM as a data source. An LLM may only restructure text that was
   already ingested from a recorded source, and its output is stored as
   `MODEL_OUTPUT`, never as evidence.
+* No connector written against a remembered API specification. Every endpoint
+  in section 2.2 was probed against the live service before any code was
+  written against it, and the registry records the date it was verified.
+* No source reached that is not declared in the registry: the SSRF allow-list
+  is derived from the same tuple, so an undeclared host is unreachable rather
+  than merely unused.

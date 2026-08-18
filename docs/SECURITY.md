@@ -110,7 +110,9 @@ descriptions as text nodes, never via `dangerouslySetInnerHTML`, and the API set
 | Input validation | Pydantic models on every request and on every external response. Unknown fields rejected where the shape should be closed. |
 | SQL injection | SQLAlchemy parameter binding throughout; no f-string SQL anywhere. Enforced by a test that greps for raw SQL interpolation patterns. |
 | Command injection | The application never invokes a shell. No `subprocess`, `os.system`, or `eval` in `backend/app/`, asserted by test. |
-| SSRF | The HTTP client is restricted to an explicit allow-list of hosts, resolved and re-checked before connect; redirects to non-allow-listed hosts are refused; private/link-local address ranges are blocked. |
+| SSRF | The HTTP client is restricted to an explicit allow-list of hosts, resolved and re-checked before connect; redirects to non-allow-listed hosts are refused; private/link-local address ranges are blocked. The evidence half of the list is *derived from the source registry* rather than maintained separately, and only from sources with an implemented connector — so a declared-but-unbuilt source cannot be reached even by accident, and the list cannot drift from what the dashboard says is in use. |
+| XML parsing | The one XML feed (Treasury's yield curve) is parsed with `defusedxml`, not the standard library, so entity-expansion and external-entity attacks are refused at the parser rather than relied upon to be off by default. |
+| Third-party budgets | Where a source publishes a daily request cap, consumption is reserved in the database before the call and the connector refuses when the budget is exhausted. This is an integrity property as much as a courtesy one: a connector that hammers a public endpoint until it is blocked has taken the platform's own evidence offline. |
 | Path traversal | The application opens no user-influenced file paths. |
 | Deserialisation | JSON only. No `pickle`, `yaml.load`, or `marshal` on external input, asserted by test. |
 | Rate limiting | Per-key token bucket on the API; separate stricter bucket on operator routes. |

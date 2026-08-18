@@ -2,14 +2,13 @@
 
 ## Implementation status
 
-**The backtesting engine is not implemented.** This document specifies the
-design it must follow, and — more usefully — describes the properties already
-built into the data model that make an honest backtest possible at all.
+The replay runner and walk-forward splitter are implemented
+(`backend/app/backtest/`). Model *fitting* is not, and cannot be: no market this
+system predicted has resolved yet, so there is nothing to fit on.
 
 That distinction matters. Most backtesting frameworks fail not because the
 simulation loop is wrong but because the *data* permits look-ahead. The
-groundwork below is implemented and tested; the runner on top of it is not
-written yet.
+groundwork below is what makes an honest backtest possible at all.
 
 | Component | Status |
 |---|---|
@@ -19,9 +18,35 @@ written yet.
 | Closed/resolved/cancelled markets retained (no survivorship bias) | **implemented** |
 | Immutable input references on every prediction | **implemented** |
 | Fill simulation against a recorded book | **implemented** (`execution/paper.py`) |
-| Walk-forward runner | **not implemented** |
-| Train/validation/out-of-sample splitting | **not implemented** |
-| Model fitting | **not implemented** (no resolved-market history yet) |
+| Replay runner calling the production engines at a historical `as_of` | **implemented** (`backtest/runner.py`) |
+| Empirical no-look-ahead check | **implemented** (`verify_no_lookahead`) |
+| Walk-forward splitter with purging, embargo and event grouping | **implemented** (`backtest/walkforward.py`) |
+| Per-category training-readiness reporting | **implemented** |
+| Model fitting | **not implemented** — no resolved-market history yet |
+
+### The runner replays production code, not a copy of it
+
+`BacktestRunner.replay()` calls the same classification, feature-building,
+category-model, probability, edge and risk code the live worker calls, with
+`as_of` set to a past instant. There is no separate "backtest implementation" of
+the model that could drift from the live one — a class of bug that is
+essentially undetectable once it exists.
+
+Every read inside that path filters on `known_at <= as_of`. The runner does not
+enforce this from outside; the engines enforce it themselves, which is why the
+same code can serve both purposes.
+
+### Verifying the claim rather than asserting it
+
+`verify_no_lookahead()` re-runs a replay and checks that no row contributing to
+a prediction carries a `known_at` later than the `as_of` it was produced for.
+Structural arguments about look-ahead are worth making, but they are not worth
+trusting on their own: look-ahead is invisible when it happens and catastrophic
+when it does.
+
+A representative run over recorded history: 96 replay points, 0 errors, 0
+look-ahead violations. The point of quoting that number is not that it is large
+— it is small — but that the machinery runs end to end on real recorded data.
 
 ---
 
@@ -181,7 +206,11 @@ Backtesting cannot begin before the data exists.
 | Categories represented | ≥3 | Otherwise the result is about one category, not the model |
 
 On a fresh install none of these is met, and the model-health page says so
-directly rather than showing an empty chart.
+directly rather than showing an empty chart. Readiness is reported **per
+category** as well as globally (`training_readiness_by_category`), and the two
+are never pooled: 500 resolved election markets do not make a crypto model
+ready to train. `MIN_CATEGORY_TRAINING_OBSERVATIONS` (default 150) is the
+per-category bar.
 
 ---
 
