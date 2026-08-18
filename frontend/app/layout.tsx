@@ -17,6 +17,7 @@ const NAV = [
   { href: '/performance', label: 'Performance' },
   { href: '/calibration', label: 'Calibration' },
   { href: '/model-health', label: 'Model Health' },
+  { href: '/evidence', label: 'Evidence' },
   { href: '/data-sources', label: 'Data Sources' },
   { href: '/system', label: 'System' },
   { href: '/audit', label: 'Audit' },

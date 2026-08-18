@@ -27,6 +27,8 @@ from app.core.enums import (
     EventType,
     MarketCategory,
     MarketSubcategory,
+    ModelabilityStatus,
+    ModelabilityTier,
     ResolutionMechanism,
 )
 
@@ -346,3 +348,45 @@ def _subject_tags(
             tags.add(keyword)
 
     return tuple(sorted(tags))
+
+
+# ---------------------------------------------------------------------------
+# Modelability tier
+# ---------------------------------------------------------------------------
+
+_SUBJECTIVE_MECHANISMS = frozenset(
+    {ResolutionMechanism.MEDIA_CONSENSUS, ResolutionMechanism.DISCRETIONARY}
+)
+
+
+def modelability_tier(
+    *,
+    classification: DeepClassification,
+    modelability_status: str | None,
+    has_independent_estimate: bool,
+    evidence_feature_count: int,
+) -> ModelabilityTier:
+    """How much of an independent view this platform can actually take.
+
+    Deliberately conservative and deliberately not a function of the edge. The
+    tier answers "could we model this at all", which has to be decided before
+    the model runs, or it becomes a post-hoc justification for whatever number
+    came out.
+
+    HIGH requires both an independent estimate *and* outside evidence behind
+    it — a model that ran on nothing but the venue's own price is not a HIGH
+    tier no matter how confident it reports itself to be.
+    """
+    if modelability_status == ModelabilityStatus.UNMODELABLE.value:
+        return ModelabilityTier.UNMODELABLE
+    if classification.resolution_mechanism in _SUBJECTIVE_MECHANISMS:
+        # Nobody publishes "what the media broadly agreed", so there is no
+        # series to check a forecast against, whatever the question's shape.
+        return ModelabilityTier.UNMODELABLE
+    if classification.subcategory is MarketSubcategory.UNCLASSIFIED:
+        return ModelabilityTier.LOW
+    if has_independent_estimate and evidence_feature_count > 0:
+        return ModelabilityTier.HIGH
+    if evidence_feature_count > 0:
+        return ModelabilityTier.MEDIUM
+    return ModelabilityTier.LOW

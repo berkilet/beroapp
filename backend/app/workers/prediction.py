@@ -64,7 +64,7 @@ from app.engines.probability import (
 from app.engines.category_models import CategoryModelRouter
 from app.engines.features import FeatureBuilder
 from app.engines.risk import PortfolioState, RiskEngine
-from app.evidence.classify import classify_deep
+from app.evidence.classify import classify_deep, modelability_tier
 from app.evidence.question_shape import detect_shape
 from app.evidence.signal_strength import assess_signal_strength
 from app.ingest.repository import record_system_event
@@ -660,6 +660,13 @@ class PredictionWorker:
             settings=self.settings,
         )
 
+        self._persist_classification(
+            ctx.market,
+            classification=classification,
+            feature_vector=feature_vector,
+            has_independent_estimate=strength.has_independent_estimate,
+        )
+
         signal_row = self._persist_signal(
             session, ctx, prediction_row, edge_result, predicted_at, strength
         )
@@ -721,6 +728,50 @@ class PredictionWorker:
             strength.strength.value,
             strength.has_independent_estimate,
         )
+
+    def _persist_classification(
+        self,
+        market: Market,
+        *,
+        classification,
+        feature_vector,
+        has_independent_estimate: bool,
+    ) -> None:
+        """Cache the classification and the modelability tier on the market row.
+
+        Ownership is split by column, not by worker, because the two workers
+        cover different market sets and know different things:
+
+        * subcategory / event_type / resolution_mechanism / detail — written by
+          both this worker and the evidence worker. They cannot disagree:
+          `classify_deep` is a pure function of the same three inputs. Writing
+          it here matters because the evidence worker only reaches the most
+          liquid few hundred markets per cycle, while this one evaluates every
+          modelable market.
+        * `evidence_available` — the evidence worker only, since it is the one
+          that creates the links.
+        * `modelability_tier` — this worker only, since HIGH depends on whether
+          a category model actually produced an estimate, which is not known
+          until the model has run.
+
+        `evidence_feature_count` counts features sourced from outside
+        Polymarket. A market whose features all come from its own order book
+        has no outside evidence, whatever is linked to it.
+        """
+        market.subcategory = (
+            classification.subcategory.value
+            if classification.subcategory is not MarketSubcategory.UNCLASSIFIED
+            else None
+        )
+        market.event_type = classification.event_type.value
+        market.resolution_mechanism = classification.resolution_mechanism.value
+        market.classification_detail = classification.as_detail()
+        market.modelability_tier = modelability_tier(
+            classification=classification,
+            modelability_status=market.modelability_status,
+            has_independent_estimate=has_independent_estimate,
+            evidence_feature_count=feature_vector.evidence_feature_count(),
+        ).value
 
     def _persist_features(self, session: Session, vector) -> None:
         """Materialise the feature vector so training and replay share one matrix.

@@ -20,6 +20,7 @@ from app.db.session import database_reachable, reset_engine, session_scope
 from app.ingest.polymarket import PolymarketClient
 from app.ingest.repository import record_system_event
 from app.workers.discovery import DiscoveryWorker
+from app.workers.evidence import EvidenceWorker
 from app.workers.metrics import MetricsWorker
 from app.workers.prediction import PredictionWorker
 from app.workers.resolution import ResolutionWorker
@@ -80,6 +81,7 @@ async def run() -> None:
         prediction = PredictionWorker(settings)
         resolution = ResolutionWorker(client, settings)
         metrics = MetricsWorker(settings)
+        evidence = EvidenceWorker(client.fetcher, settings)
 
         async def discovery_job() -> None:
             await discovery.run_once()
@@ -92,6 +94,9 @@ async def run() -> None:
                 clock_skew_s=snapshot.last_clock_skew_s,
                 consecutive_api_failures=snapshot.consecutive_batch_failures,
             )
+
+        async def evidence_job() -> None:
+            await evidence.run_once()
 
         async def resolution_job() -> None:
             await resolution.run_once()
@@ -126,6 +131,15 @@ async def run() -> None:
             interval_s=settings.prediction_interval_s,
             component=SystemComponent.PROBABILITY_ENGINE.value,
             initial_delay_s=60,
+        )
+        # Evidence collection shares the Polymarket client's fetcher: one
+        # connection pool, one limiter and one circuit breaker per host. Started
+        # after discovery so there are markets to link evidence to.
+        supervisor.add_job(
+            "evidence", evidence_job,
+            interval_s=settings.evidence_interval_s,
+            component=SystemComponent.DATA_FEED.value,
+            initial_delay_s=90,
         )
         supervisor.add_job(
             "resolution", resolution_job,

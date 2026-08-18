@@ -93,6 +93,23 @@ const RECOMMENDATION_TONE: Record<string, string> = {
   LOW: 'bg-ok/15 text-ok border-ok/30',
   MEDIUM: 'bg-warn/15 text-warn border-warn/30',
   HIGH: 'bg-bad/15 text-bad border-bad/30',
+  // Signal strength. SIGNAL is the only state that clears every evidence gate,
+  // so it is the only one coloured as an affirmative result.
+  SIGNAL: 'bg-ok/15 text-ok border-ok/30',
+  CANDIDATE: 'bg-warn/15 text-warn border-warn/30',
+  NONE: 'bg-muted/10 text-muted border-muted/30',
+  READY: 'bg-ok/15 text-ok border-ok/30',
+  EVIDENCE: 'bg-ok/15 text-ok border-ok/30',
+  NO_EVIDENCE: 'bg-warn/10 text-warn border-warn/30',
+  NOT_ASSESSED: 'bg-muted/10 text-muted border-muted/30',
+  // Evidence verification and conflict resolution.
+  CONFIRMED_FACT: 'bg-ok/15 text-ok border-ok/30',
+  REPORTED_INFORMATION: 'bg-info/15 text-info border-info/30',
+  UNCONFIRMED_CLAIM: 'bg-warn/10 text-warn border-warn/30',
+  ANALYST_OPINION: 'bg-warn/10 text-warn border-warn/30',
+  UNVERIFIED: 'bg-muted/10 text-muted border-muted/30',
+  SUPERSEDED: 'bg-muted/10 text-muted border-muted/30',
+  UNRESOLVED: 'bg-bad/15 text-bad border-bad/30',
 };
 
 export function Badge({ value, muted = false }: { value: string | null | undefined; muted?: boolean }) {

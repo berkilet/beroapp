@@ -342,6 +342,114 @@ SOURCES: tuple[SourceDefinition, ...] = (
         implemented=True,
         verified_on="2026-08-18",
     ),
+    # -- Tier 2-4: declared so the ranking is explicit, none implemented ----
+    #
+    # These carried over from the Phase 1 seed list. They live here rather than
+    # in a second list because two competing declarations of the same source
+    # produced two rows for the same body on the dashboard — one enabled and
+    # collecting, one disabled and empty. One registry, one row.
+    SourceDefinition(
+        source_key="reuters",
+        name="Reuters",
+        source_type=SourceType.NEWS,
+        tier=2,
+        base_url="https://www.reuters.com",
+        access_method="NOT_IMPLEMENTED",
+        reliability_score=0.85,
+        update_frequency_s=3600,
+        categories=(
+            MarketCategory.POLITICS,
+            MarketCategory.GEOPOLITICS,
+            MarketCategory.BUSINESS,
+        ),
+        subcategories=(),
+        parser_name="reuters",
+        parser_version="v0",
+        documented_rate_limit="n/a — no automated access without a licence",
+        terms_url="https://www.reuters.com/info-pages/terms-of-use/",
+        usage_notes=(
+            "Not implemented. Automated redistribution requires a paid licence, "
+            "which the zero-cost constraint excludes. Items would be classified "
+            "REPORTED_INFORMATION and could never reach CONFIRMED_FACT."
+        ),
+        requires_api_key=True,
+        implemented=False,
+    ),
+    SourceDefinition(
+        source_key="associated_press",
+        name="Associated Press",
+        source_type=SourceType.NEWS,
+        tier=2,
+        base_url="https://apnews.com",
+        access_method="NOT_IMPLEMENTED",
+        reliability_score=0.80,
+        update_frequency_s=3600,
+        categories=(
+            MarketCategory.POLITICS,
+            MarketCategory.GEOPOLITICS,
+            MarketCategory.ELECTIONS,
+        ),
+        subcategories=(),
+        parser_name="associated_press",
+        parser_version="v0",
+        documented_rate_limit="n/a — no automated access without a licence",
+        terms_url="https://www.ap.org/terms-of-use/",
+        usage_notes="Not implemented. Licensing is required for automated use.",
+        requires_api_key=True,
+        implemented=False,
+    ),
+    SourceDefinition(
+        source_key="polling_aggregators",
+        name="Established polling aggregators",
+        source_type=SourceType.POLLING,
+        tier=3,
+        base_url="https://example.invalid/polling",
+        access_method="NOT_IMPLEMENTED",
+        reliability_score=0.60,
+        update_frequency_s=12 * 3600,
+        categories=(MarketCategory.ELECTIONS, MarketCategory.POLITICS),
+        subcategories=(
+            MarketSubcategory.US_PRESIDENTIAL,
+            MarketSubcategory.US_CONGRESSIONAL,
+            MarketSubcategory.US_PRIMARY,
+        ),
+        parser_name="polling_aggregators",
+        parser_version="v0",
+        documented_rate_limit="varies by publisher",
+        terms_url="https://example.invalid/polling",
+        usage_notes=(
+            "Not implemented. Terms differ per publisher and must be checked one "
+            "at a time; there is no single aggregator whose licence covers the "
+            "others. The base_url is deliberately unroutable so that nothing can "
+            "reach a real host through this row before a specific publisher is "
+            "chosen and documented."
+        ),
+        implemented=False,
+    ),
+    SourceDefinition(
+        source_key="social_media",
+        name="Social media",
+        source_type=SourceType.SOCIAL_MEDIA,
+        tier=4,
+        base_url="https://example.invalid/social",
+        access_method="NOT_IMPLEMENTED",
+        reliability_score=0.20,
+        update_frequency_s=900,
+        categories=(),
+        subcategories=(),
+        parser_name="social_media",
+        parser_version="v0",
+        documented_rate_limit="varies by platform",
+        terms_url="https://example.invalid/social",
+        usage_notes=(
+            "Not implemented and not planned. If it were added, every item would "
+            "be stored UNVERIFIED, could never be promoted to CONFIRMED_FACT, and "
+            "could never independently raise a signal — it would be an early "
+            "warning to go and check a Tier-1 source, nothing more."
+        ),
+        requires_api_key=True,
+        implemented=False,
+    ),
 )
 
 BY_KEY: dict[str, SourceDefinition] = {s.source_key: s for s in SOURCES}

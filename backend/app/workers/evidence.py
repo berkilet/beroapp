@@ -17,11 +17,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.enums import ComponentHealth, MarketCategory, MarketSubcategory, SystemComponent
 from app.core.logging import get_correlation_id, get_logger
-from app.db.models import ExternalSource, Market
+from app.db.models import ExternalSource, Market, MarketEvidenceLink
 from app.db.session import session_scope
 from app.evidence import conflicts as conflict_engine
 from app.evidence.base import EvidenceError, EvidenceProvider
@@ -42,6 +43,17 @@ log = get_logger("workers.evidence")
 # Markets to (re)link per cycle. Linking is cheap but not free, and the markets
 # worth linking are the ones a model could actually run on.
 MAX_MARKETS_PER_CYCLE = 400
+
+
+def _has_existing_links(session: Session, market_id: int) -> bool:
+    """Whether any evidence is already linked to this market.
+
+    A cycle that creates no new links has not established that a market is
+    without evidence — the links may simply have been made on an earlier pass.
+    """
+    return session.execute(
+        select(MarketEvidenceLink.id).where(MarketEvidenceLink.market_id == market_id).limit(1)
+    ).scalar_one_or_none() is not None
 
 
 class EvidenceWorker:
@@ -211,21 +223,27 @@ class EvidenceWorker:
                     category=MarketCategory(market.category),
                 )
 
-                # Persist the deeper classification alongside Phase 1's.
-                market.subcategory = classification.subcategory.value
-                market.event_type = classification.event_type.value
-                market.resolution_mechanism = classification.resolution_mechanism.value
-                market.classification_detail = classification.as_detail()
-
                 subcategory = (
                     classification.subcategory
                     if classification.subcategory is not MarketSubcategory.UNCLASSIFIED
                     else None
                 )
-                series = relevant_series(subcategory, asset=classification.asset)
-                market.evidence_available = bool(series)
 
+                # This worker owns the classification columns on `markets`. The
+                # prediction worker recomputes the same classification for its
+                # own use but writes only `modelability_tier`, so the two cannot
+                # disagree about what a market is.
+                market.subcategory = subcategory.value if subcategory else None
+                market.event_type = classification.event_type.value
+                market.resolution_mechanism = classification.resolution_mechanism.value
+                market.classification_detail = classification.as_detail()
+
+                series = relevant_series(subcategory, asset=classification.asset)
                 if not series:
+                    # No source is declared for this kind of question, so no
+                    # evidence can exist for it — which is different from a
+                    # question we could source but have not collected yet.
+                    market.evidence_available = False
                     continue
 
                 matches = link_evidence_for_market(
@@ -236,6 +254,13 @@ class EvidenceWorker:
                     ticker=None,
                     subject_tags=classification.subject_tags,
                     as_of=as_of,
+                )
+                # `evidence_available` means evidence is actually linked, not
+                # that a source exists in principle. The dashboard renders it as
+                # a badge, and the optimistic reading would put an EVIDENCE
+                # badge on a market with nothing behind it.
+                market.evidence_available = bool(matches) or _has_existing_links(
+                    session, market.id
                 )
                 if matches:
                     stats["markets_linked"] += 1

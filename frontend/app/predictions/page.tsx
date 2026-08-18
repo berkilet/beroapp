@@ -1,5 +1,5 @@
 import { apiFetch, ago, num, pct } from '@/lib/api';
-import { Badge, EdgeCell, Empty, ErrorBanner, MarketLink, Panel, Table, Td } from '@/components/ui';
+import { Badge, EdgeCell, Empty, ErrorBanner, MarketLink, Notice, Panel, Table, Td } from '@/components/ui';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,6 +19,14 @@ interface Prediction {
   data_latency_ms: number | null;
   model_latency_ms: number | null;
   rationale: { risk_factors?: string[]; adjustments?: Record<string, number> } | null;
+  independent_estimate: {
+    available: boolean;
+    reason?: string;
+    model_id?: string;
+    model_version?: string;
+    probability?: number;
+    uncertainty?: number;
+  } | null;
 }
 
 export default async function PredictionsPage() {
@@ -36,6 +44,13 @@ export default async function PredictionsPage() {
         </p>
       </header>
 
+      <Notice>
+        The <span className="font-mono">Independent</span> column is the estimate a category model
+        produced from outside evidence, before it was blended with the market-anchored baseline. A
+        dash there means no category model applied and the row&apos;s model probability is a
+        restatement of the market, not a forecast that disagrees with it.
+      </Notice>
+
       {error || !data ? (
         <ErrorBanner error={error ?? 'no data'} />
       ) : data.items.length === 0 ? (
@@ -43,7 +58,7 @@ export default async function PredictionsPage() {
       ) : (
         <Panel title={`${data.count} most recent predictions`}>
           <Table
-            headers={['When', 'Market', 'Category', 'Market P', 'Executable P', 'Model P', 'Edge', 'Uncertainty', 'Confidence', 'Res. risk', 'Data lag', 'Model lag', 'Model', 'Risk factors']}
+            headers={['When', 'Market', 'Category', 'Market P', 'Executable P', 'Model P', 'Independent', 'Edge', 'Uncertainty', 'Confidence', 'Res. risk', 'Data lag', 'Model lag', 'Model', 'Risk factors']}
           >
             {data.items.map((p) => (
               <tr key={p.id} className="hover:bg-edge/20">
@@ -53,6 +68,17 @@ export default async function PredictionsPage() {
                 <Td mono>{pct(p.market_probability)}</Td>
                 <Td mono>{pct(p.executable_market_probability)}</Td>
                 <Td mono>{pct(p.model_probability)}</Td>
+                <Td mono>
+                  {p.independent_estimate?.available ? (
+                    <span title={p.independent_estimate.model_version}>
+                      {pct(p.independent_estimate.probability)}
+                    </span>
+                  ) : (
+                    <span className="text-muted" title={p.independent_estimate?.reason ?? undefined}>
+                      —
+                    </span>
+                  )}
+                </Td>
                 <Td><EdgeCell value={p.model_probability - p.market_probability} /></Td>
                 <Td mono>{num(p.model_uncertainty, 3)}</Td>
                 <Td mono>{pct(p.confidence, 0)}</Td>
