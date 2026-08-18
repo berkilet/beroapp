@@ -179,7 +179,9 @@ SQL_INTERPOLATION_EXEMPTIONS = {"db/session.py"}
 
 def test_no_raw_sql_string_interpolation() -> None:
     """SQL is built by SQLAlchemy with bound parameters, never by formatting."""
-    pattern = re.compile(r"""(execute|text)\s*\(\s*f["']""", re.I)
+    # Word-boundaried so that `findtext(f"d:{field}")` — an XPath expression in
+    # the Treasury XML parser — is not mistaken for SQLAlchemy's `text()`.
+    pattern = re.compile(r"""\b(execute|text)\s*\(\s*f["']""", re.I)
     offenders: list[str] = []
     for path in PY_FILES:
         for i, line in enumerate(path.read_text().splitlines(), 1):
